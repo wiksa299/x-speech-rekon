@@ -7,10 +7,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <exception>
 #include <utility>
 #include <vector>
 
-namespace xvr {
+namespace xsr {
 
 const char* localized(const char* english, const char* french, const char* spanish) {
     switch (XPLMGetLanguage()) {
@@ -99,9 +100,9 @@ Window::~Window() {
 
 bool Window::visible() const { return window_ && XPLMGetWindowIsVisible(window_); }
 
-void Window::show() {
+void Window::show(const char* title) {
     if (!window_) return;
-    XPLMSetWindowTitle(window_, "X-Voice-Rekon");
+    XPLMSetWindowTitle(window_, title);
     XPLMSetWindowIsVisible(window_, 1);
     XPLMBringWindowToFront(window_);
 }
@@ -120,7 +121,10 @@ void Window::position(int x, int y) {
     ImGui::GetIO().AddMousePosEvent(float(x - left), float(top - y));
 }
 
-void Window::draw_cb(XPLMWindowID, void* data) { static_cast<Window*>(data)->draw(); }
+void Window::draw_cb(XPLMWindowID, void* data) {
+    try { static_cast<Window*>(data)->draw(); }
+    catch (const std::exception&) { XPLMDebugString("X-Speech Rekon: window rendering failed\n"); }
+}
 
 int Window::click_cb(XPLMWindowID, int x, int y, XPLMMouseStatus status, void* data) {
     auto& self = *static_cast<Window*>(data);
@@ -165,8 +169,15 @@ void Window::draw() {
     ImGui::SetNextWindowSize(io.DisplaySize);
     constexpr auto flags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings;
-    ImGui::Begin("##xvr", nullptr, flags);
-    draw_content_();
+    ImGui::Begin("##xsr", nullptr, flags);
+    try { draw_content_(); }
+    catch (const std::exception&) {
+        const bool recovery_asserts = io.ConfigErrorRecoveryEnableAssert;
+        io.ConfigErrorRecoveryEnableAssert = false;
+        ImGui::EndFrame();
+        io.ConfigErrorRecoveryEnableAssert = recovery_asserts;
+        throw;
+    }
     ImGui::End();
     ImGui::Render();
 
@@ -174,6 +185,7 @@ void Window::draw() {
     static_assert(sizeof(ImDrawVert) == 20 && offsetof(ImDrawVert, col) == 16);
     static_assert(sizeof(ImDrawIdx) == sizeof(uint16_t));
     XPLMTransformPush();
+    struct RestoreTransform { ~RestoreTransform() { XPLMTransformPop(); } } restore_transform;
     XPLMTransformTranslate(float(left), float(top));
     XPLMTransformScale(1.0f, -1.0f);
     std::vector<XPLMDrawCall_t> calls;
@@ -190,7 +202,6 @@ void Window::draw() {
                         list.IdxBuffer.Size, list.IdxBuffer.Data};
         XPLMDrawCalls(&mesh, int(calls.size()), calls.data());
     }
-    XPLMTransformPop();
 }
 
-} // namespace xvr
+} // namespace xsr

@@ -3,6 +3,6 @@
 /copilot-test/
 /SPEC.md
 /PLAN.md
-/mockup-x-voice-rekon.html
+/mockup-*.html
 *.gguf
 *.part

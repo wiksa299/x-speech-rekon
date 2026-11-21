@@ -3,7 +3,7 @@ name: Windows x86-64 preview
 on:
   workflow_dispatch:
   push:
-    branches: ['main', 'xvr/windows-preview']
+    branches: ['main', '*/windows-preview']
   pull_request:
 
 permissions:
@@ -42,29 +42,29 @@ jobs:
             '--default-answer', '--confirm-command', 'install') -Wait -PassThru
           if ($process.ExitCode -ne 0 -or !(Test-Path "$sdk\Bin\glslc.exe")) { throw 'Vulkan SDK installation failed' }
           "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
-          "XVR_WINDOWS_BUILD=$env:RUNNER_TEMP\xv" >> $env:GITHUB_ENV
+          "XSR_WINDOWS_BUILD=$env:RUNNER_TEMP\xv" >> $env:GITHUB_ENV
       - name: Configure, build and test
         shell: pwsh
         run: |
-          cmake -S . -B $env:XVR_WINDOWS_BUILD -G 'Visual Studio 17 2022' -A x64 -DXVR_VULKAN=ON
+          cmake -S . -B $env:XSR_WINDOWS_BUILD -G 'Visual Studio 17 2022' -A x64 -DXSR_VULKAN=ON
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build $env:XVR_WINDOWS_BUILD --config Release --parallel 2
+          cmake --build $env:XSR_WINDOWS_BUILD --config Release --parallel 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          ctest --test-dir $env:XVR_WINDOWS_BUILD -C Release --output-on-failure
+          ctest --test-dir $env:XSR_WINDOWS_BUILD -C Release --output-on-failure
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Assemble and inspect native package
         shell: pwsh
         run: |
-          cmake --install $env:XVR_WINDOWS_BUILD --config Release --prefix dist/stage --component xvr
+          cmake --install $env:XSR_WINDOWS_BUILD --config Release --prefix dist/stage --component xsr
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           .\cmake\package-windows.ps1 -RequireVulkan
 
       - name: Upload installable archive and checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: X-Voice-Rekon-Windows-x86-64
+          name: X-Speech-Rekon-Windows-x86-64
           path: |
-            dist/X-Voice-Rekon-Windows-x86-64.zip
-            dist/X-Voice-Rekon-Windows-x86-64.zip.sha256
+            dist/X-Speech-Rekon-Windows-x86-64.zip
+            dist/X-Speech-Rekon-Windows-x86-64.zip.sha256
           if-no-files-found: error

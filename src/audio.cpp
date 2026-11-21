@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace xvr {
+namespace xsr {
 namespace {
 
 class AudioContext {
@@ -122,14 +122,14 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
     if (released || cancelled) return;
     if (!injection.empty()) {
         const auto input = read_wav(injection);
-        if (input.empty()) { target.error = XVR_BAD_REQUEST; return; }
+        if (input.empty()) { target.error = XSR_BAD_REQUEST; return; }
         state.append(input.data(), input.size());
         if (target.count) report(target.level, true);
         while (!released && !cancelled) std::this_thread::sleep_for(5ms);
         return;
     }
     AudioContext context;
-    if (!context.ready) { target.error = XVR_MIC_UNAVAILABLE; return; }
+    if (!context.ready) { target.error = XSR_MIC_UNAVAILABLE; return; }
     ma_device_info* devices = nullptr;
     ma_uint32 count = 0;
     ma_device_id* chosen = nullptr;
@@ -139,7 +139,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
                 if (microphone_id(devices[i]) == microphone) { chosen = &devices[i].id; break; }
             }
         }
-        if (!chosen) { target.error = XVR_MIC_UNAVAILABLE; return; }
+        if (!chosen) { target.error = XSR_MIC_UNAVAILABLE; return; }
     }
 
     auto config = ma_device_config_init(ma_device_type_capture);
@@ -153,7 +153,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
     config.pUserData = &state;
     ma_device device{};
     if (ma_device_init(&context.value, &config, &device) != MA_SUCCESS) {
-        target.error = XVR_MIC_UNAVAILABLE;
+        target.error = XSR_MIC_UNAVAILABLE;
         return;
     }
     if (released || cancelled) {
@@ -161,7 +161,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
         return;
     }
     if (ma_device_start(&device) != MA_SUCCESS) {
-        target.error = XVR_MIC_UNAVAILABLE;
+        target.error = XSR_MIC_UNAVAILABLE;
         ma_device_uninit(&device);
         return;
     }
@@ -178,7 +178,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
         std::this_thread::sleep_for(5ms);
     }
     ma_device_uninit(&device);
-    if (target.disconnected) target.error = XVR_MIC_UNAVAILABLE;
+    if (target.disconnected) target.error = XSR_MIC_UNAVAILABLE;
 }
 
-} // namespace xvr
+} // namespace xsr

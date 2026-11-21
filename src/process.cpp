@@ -20,7 +20,7 @@
 extern char** environ;
 #endif
 
-namespace xvr {
+namespace xsr {
 
 #ifdef _WIN32
 using Pipe = HANDLE;
@@ -60,7 +60,10 @@ struct Process::Impl {
     void read_messages();
     void write_messages();
     void fail() {
-        dead = true;
+        {
+            std::lock_guard lock(mutex);
+            dead = true;
+        }
         available.notify_all();
     }
 };
@@ -195,7 +198,7 @@ void Process::Impl::read_messages() {
             }
             auto message = Json::parse(pending, nullptr, false);
             pending.clear();
-            if (!message.is_object() || !message.contains("type")) { invalid = true; break; }
+            if (!message.is_object() || !message.contains("type") || !message["type"].is_string()) { invalid = true; break; }
             std::lock_guard lock(mutex);
             if (inbound.size() >= 128) { invalid = true; break; }
             inbound.push_back(std::move(message));
@@ -247,7 +250,10 @@ bool Process::start() {
         stop();
         return false;
     }
-    state.dead = false;
+    {
+        std::lock_guard lock(state.mutex);
+        state.dead = false;
+    }
     try {
         state.reader = std::thread([&state] { state.read_messages(); });
         state.writer = std::thread([&state] { state.write_messages(); });
@@ -262,7 +268,9 @@ bool Process::send(const Json& message) {
     auto line = wire_frame(message);
     auto& state = *impl_;
     std::lock_guard lock(state.mutex);
-    if (state.dead || line.empty() || state.outbound.size() >= 64) return false;
+    const auto type = message.value("type", "");
+    const bool control = type == "end" || type == "cancel" || type == "shutdown" || type == "cancel_download";
+    if (state.dead || line.empty() || state.outbound.size() >= (control ? 68u : 64u)) return false;
     state.outbound.push_back(std::move(line));
     state.available.notify_one();
     return true;
@@ -294,8 +302,9 @@ void Process::stop() {
     if (state.reader.joinable()) state.reader.join();
     close_pipe(state.to_engine);
     close_pipe(state.from_engine);
+    std::lock_guard lock(state.mutex);
     state.outbound.clear();
     state.inbound.clear();
 }
 
-} // namespace xvr
+} // namespace xsr

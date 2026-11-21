@@ -1,6 +1,6 @@
 #pragma once
 
-#include "xvoice_rekon.h"
+#include "xspeech_rekon.h"
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -14,7 +14,7 @@
 #include <string_view>
 #include <vector>
 
-namespace xvr {
+namespace xsr {
 
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -25,7 +25,7 @@ constexpr size_t max_frame = 65536;
 constexpr int local_client = -2;
 constexpr uint32_t sample_rate = 16000;
 constexpr uint32_t max_samples = 30 * sample_rate;
-constexpr uint32_t max_result_size = XVR_MAX_TEXT_BYTES;
+constexpr uint32_t max_result_size = XSR_MAX_TEXT_BYTES;
 
 std::string status_name(uint32_t status);
 bool valid_utf8(std::string_view input);
@@ -82,7 +82,7 @@ struct Delivery {
     uint32_t kind;
     uint32_t status;
     uint64_t session;
-    uint32_t stage = XVR_STAGE_NONE;
+    uint32_t stage = XSR_STAGE_NONE;
     Json result = Json::object();
 };
 
@@ -91,11 +91,13 @@ public:
     using Send = std::function<bool(const Json&)>;
     using Deliver = std::function<void(const Delivery&)>;
     Broker(Send send, Deliver deliver);
-    void request(int sender, XvrRequest& request, Clock::time_point now);
+    void request(int sender, XsrRequest& request, Clock::time_point now);
     void accept(const Json& event, Clock::time_point now);
     void tick(Clock::time_point now);
     void set_settings(Settings settings, Clock::time_point now);
     void engine_online(Clock::time_point now);
+    void restore_last_good(Profile profile) { last_good_ = std::move(profile); }
+    const Profile& last_good() const { return last_good_; }
     void engine_lost(Clock::time_point now);
     void shutdown(Clock::time_point now);
     void forget(int client, Clock::time_point now);
@@ -104,7 +106,9 @@ public:
     void cancel_local(Clock::time_point now);
     bool busy() const { return active_.has_value(); }
     bool ready() const { return ready_; }
-    bool restart_due(Clock::time_point now) const { return draining_ && now >= drain_deadline_; }
+    bool service_ready() const { return ready_ && configuration_confirmed_ && !draining_session_; }
+    bool restart_due(Clock::time_point now) const { return (draining_session_ && now >= drain_deadline_) ||
+        (ready_ && !configuration_confirmed_ && now >= configure_deadline_); }
     uint32_t model_state() const { return model_state_; }
     const std::string& actual_compute() const { return actual_compute_; }
     bool cpu_fallback() const { return cpu_fallback_; }
@@ -126,24 +130,29 @@ private:
     uint32_t release(int client, uint64_t session, Clock::time_point now);
     void finish(uint32_t status, uint32_t stage, Json result, Clock::time_point now);
     void configure(Clock::time_point now);
-    void status(XvrRequest&) const;
+    void send_configuration(Clock::time_point now);
+    void abort_session(uint32_t status, uint32_t stage, Clock::time_point now);
+    void recover_profile(Clock::time_point now);
+    void unload(Clock::time_point now);
+    void status(XsrRequest&) const;
 
     Send send_;
     Deliver deliver_;
     Settings settings_;
     std::optional<Settings> pending_;
-    std::optional<Profile> previous_;
+    Profile last_good_;
     std::optional<Session> active_;
     std::map<int, std::vector<std::string>> subscribers_;
     Clock::time_point last_use_{};
     uint64_t next_session_ = 0;
     uint64_t generation_ = 0;
-    uint32_t model_state_ = XVR_MODEL_MISSING;
+    uint32_t model_state_ = XSR_MODEL_MISSING;
     std::string actual_compute_;
     bool cpu_fallback_ = false;
-    bool ready_ = false;
-    bool draining_ = false;
-    Clock::time_point drain_deadline_{};
+    bool ready_ = false, configuration_confirmed_ = false;
+    uint64_t draining_session_ = 0;
+    std::optional<Clock::time_point> configure_retry_, unload_retry_;
+    Clock::time_point drain_deadline_{}, configure_deadline_{};
 };
 
-} // namespace xvr
+} // namespace xsr

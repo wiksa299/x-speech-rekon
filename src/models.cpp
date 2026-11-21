@@ -17,7 +17,7 @@
 #include <openssl/evp.h>
 #endif
 
-namespace xvr {
+namespace xsr {
 namespace {
 
 #ifdef _WIN32
@@ -186,7 +186,7 @@ bool get(const std::string& url, Transfer& transfer) {
     std::wstring path(components.lpszUrlPath, components.dwUrlPathLength);
     if (components.dwExtraInfoLength) path.append(components.lpszExtraInfo, components.dwExtraInfoLength);
 
-    HttpHandle session{WinHttpOpen(L"X-Voice-Rekon/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    HttpHandle session{WinHttpOpen(L"X-Speech-Rekon/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
     if (!session || !WinHttpSetTimeouts(session.handle, 5000, 5000, 5000, 3000)) return false;
     HttpHandle connection{WinHttpConnect(session.handle, host.c_str(), components.nPort, 0)};
@@ -228,7 +228,7 @@ bool get(const std::string& url, Transfer& transfer) {
     curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 8L);
     curl_easy_setopt(curl.get(), CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_LOW_SPEED_TIME, 10L);
-    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "X-Voice-Rekon/0.1");
+    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "X-Speech-Rekon/0.1");
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION,
         +[](char* buffer, size_t size, size_t count, void* userdata) -> size_t {
             const auto bytes = size * count;
@@ -331,4 +331,4 @@ std::string download_model(const fs::path& folder, const Json& entry,
     return stop ? "cancelled" : status;
 }
 
-} // namespace xvr
+} // namespace xsr

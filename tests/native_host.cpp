@@ -1,5 +1,6 @@
 #include "core.hpp"
 
+#include <XPLMDataAccess.h>
 #include <XPLMDisplay.h>
 #include <XPLMMenus.h>
 #include <XPLMPanelGraphics.h>
@@ -8,12 +9,16 @@
 #include <XPLMUtilities.h>
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <thread>
 
-using namespace xvr;
+using namespace xsr;
 
 namespace {
 struct Plugin {
@@ -34,7 +39,13 @@ struct Plugin {
     void* command_data = nullptr;
 };
 Plugin plugins[3];
+struct RegisteredDataRef {
+    XPLMGetDatai_f read;
+    void* context;
+};
+std::map<std::string, RegisteredDataRef> datarefs;
 int current = 0, drawn = 0;
+int vertices = 0, mouse_x = 0, mouse_y = 0;
 std::string prefs;
 auto started = Clock::now();
 XPLMLanguageCode language = xplm_Language_French;
@@ -85,10 +96,51 @@ void draw(int id) {
     require(drawn > before, "Dear ImGui emitted draw calls");
 }
 
+void click(int x, int y) {
+    AsPlugin as(1);
+    auto& window = plugins[1].window;
+    const auto id = reinterpret_cast<XPLMWindowID>(&window);
+    mouse_x = window.left + x;
+    mouse_y = window.top - y;
+    draw(1);
+    window.handleMouseClickFunc(id, mouse_x, mouse_y, xplm_MouseDown, window.refcon);
+    draw(1);
+    window.handleMouseClickFunc(id, mouse_x, mouse_y, xplm_MouseUp, window.refcon);
+    draw(1);
+    mouse_x = mouse_y = 0;
+}
+
 void pump(int id) {
     AsPlugin as(id);
     auto& plug = plugins[id];
     plug.flight(0.01f, 0.01f, 0, plug.flight_data);
+}
+
+int read_dataref(const char* name) {
+    const auto& ref = datarefs.at(name);
+    return ref.read(ref.context);
+}
+
+void wait_for_engine(bool pump_diagnostic = false) {
+    const auto limit = Clock::now() + 3s;
+    do {
+        pump(1);
+        if (pump_diagnostic) pump(2);
+        if (read_dataref(XSR_DATAREF_SERVICE_READY)) return;
+        std::this_thread::sleep_for(10ms);
+    } while (Clock::now() < limit);
+    require(false, "engine became ready");
+}
+
+XsrRequest ptt_from_diagnostic() {
+    AsPlugin as(2);
+    XsrRequest request{};
+    request.version = XSR_ABI_VERSION;
+    request.struct_size = sizeof(request);
+    request.operation = XSR_PTT_BEGIN;
+    request.status = XSR_SERVICE_UNAVAILABLE;
+    XPLMSendMessageToPlugin(1, XSR_MESSAGE_REQUEST, &request);
+    return request;
 }
 } // namespace
 
@@ -116,7 +168,34 @@ void XPLMSendMessageToPlugin(XPLMPluginID id, int message, void* parameter) {
 void XPLMGetPrefsPath(char* value) { std::strcpy(value, prefs.c_str()); }
 void XPLMDebugString(const char*) {}
 XPLMLanguageCode XPLMGetLanguage() { return language; }
+void XPLMGetVersions(int* xplane, int* sdk, XPLMHostApplicationID* host) {
+    *xplane = 12440;
+    *sdk = 440;
+    *host = xplm_Host_XPlane;
+}
 float XPLMGetElapsedTime() { return std::chrono::duration<float>(Clock::now() - started).count(); }
+
+XPLMDataRef XPLMRegisterDataAccessor(const char* name, XPLMDataTypeID type, int writable,
+    XPLMGetDatai_f read, XPLMSetDatai_f write_int, XPLMGetDataf_f read_float, XPLMSetDataf_f write_float,
+    XPLMGetDatad_f read_double, XPLMSetDatad_f write_double, XPLMGetDatavi_f read_int_array,
+    XPLMSetDatavi_f write_int_array, XPLMGetDatavf_f read_float_array, XPLMSetDatavf_f write_float_array,
+    XPLMGetDatab_f read_bytes, XPLMSetDatab_f write_bytes, void* read_context, void* write_context) {
+    require(current == 1 && type == xplmType_Int && !writable && read && !write_int &&
+        !read_float && !write_float && !read_double && !write_double && !read_int_array && !write_int_array &&
+        !read_float_array && !write_float_array && !read_bytes && !write_bytes && !write_context,
+        "dataref is a read-only integer");
+    auto inserted = datarefs.emplace(name, RegisteredDataRef{read, read_context});
+    require(inserted.second, "unique dataref");
+    return reinterpret_cast<XPLMDataRef>(&inserted.first->second);
+}
+
+void XPLMUnregisterDataAccessor(XPLMDataRef handle) {
+    const auto ref = std::find_if(datarefs.begin(), datarefs.end(), [&](auto& entry) {
+        return reinterpret_cast<XPLMDataRef>(&entry.second) == handle;
+    });
+    require(ref != datarefs.end(), "dataref registered before removal");
+    datarefs.erase(ref);
+}
 
 XPLMMenuID XPLMFindPluginsMenu() { return reinterpret_cast<XPLMMenuID>(plugins); }
 int XPLMAppendMenuItem(XPLMMenuID, const char*, void*, int) { return 0; }
@@ -141,7 +220,7 @@ void XPLMUnregisterCommandHandler(XPLMCommandRef, XPLMCommandCallback_f, int, vo
 void XPLMGetScreenBoundsGlobal(int* left, int* top, int* right, int* bottom) {
     *left = 0; *top = 1024; *right = 1280; *bottom = 0;
 }
-void XPLMGetMouseLocationGlobal(int* x, int* y) { *x = 0; *y = 0; }
+void XPLMGetMouseLocationGlobal(int* x, int* y) { *x = mouse_x; *y = mouse_y; }
 XPLMWindowID XPLMCreateWindowEx(XPLMCreateWindow_t* params) {
     auto& window = plugins[current].window;
     window = *params;
@@ -167,6 +246,7 @@ void XPLMTransformTranslate(float, float) {}
 void XPLMTransformScale(float, float) {}
 void XPLMDrawCalls(const XPLMMesh_t* mesh, int count, const XPLMDrawCall_t* commands) {
     require(mesh && mesh->vertex_count > 0 && mesh->index_count > 0, "draw mesh");
+    vertices += mesh->vertex_count;
     for (int i = 0; i < count; ++i) {
         require(commands[i].tex_ref != nullptr && commands[i].element_count % 3 == 0, "draw call");
         ++drawn;
@@ -176,58 +256,122 @@ void XPLMDrawCalls(const XPLMMesh_t* mesh, int count, const XPLMDrawCall_t* comm
 int main(int argc, char** argv) {
     try {
         require(argc == 5, "provider diagnostic engine catalog");
-        const auto root = fs::temp_directory_path() / ("xvr-native-" + std::to_string(
+        const auto root = fs::temp_directory_path() / ("xsr-native-" + std::to_string(
             Clock::now().time_since_epoch().count()));
         struct Fixture {
             fs::path root;
             ~Fixture() { std::error_code ec; fs::remove_all(root, ec); }
         } fixture{root};
         fs::create_directories(root / "bin");
-        fs::create_symlink(fs::absolute(argv[3]), root / "bin/xvr-engine");
+        fs::create_symlink(fs::absolute(argv[3]), root / "bin/xsr-engine");
         fs::copy_file(argv[4], root / "catalog.json");
         fs::copy_file(fs::path(argv[4]).parent_path() / "NotoSans-Regular.ttf", root / "NotoSans-Regular.ttf");
         prefs = (root / "X-Plane.prf").u8string();
+        const auto copy_tool = root / "bin/wl-copy";
+        std::ofstream(copy_tool) << "#!/bin/sh\ncat > \"$XSR_TEST_CLIPBOARD\"\n";
+        fs::permissions(copy_tool, fs::perms::owner_exec, fs::perm_options::add);
+        const auto clipboard = root / "clipboard.txt";
+        const char* inherited_path = std::getenv("PATH");
+        const auto tool_path = (root / "bin").string() + ":" + (inherited_path ? inherited_path : "");
+        require(setenv("PATH", tool_path.c_str(), 1) == 0 &&
+                setenv("WAYLAND_DISPLAY", "xsr-test", 1) == 0 &&
+                setenv("XSR_TEST_CLIPBOARD", clipboard.c_str(), 1) == 0, "isolated clipboard fixture");
 
         load(1, argv[1], root / "64/lin.xpl");
         load(2, argv[2], root / "diagnostic/64/lin.xpl");
-        pump(1);
-        for (int i = 0; i < 20; ++i) {
-            std::this_thread::sleep_for(10ms);
-            pump(1);
-            pump(2);
-        }
+        require(datarefs.size() == 3, "published datarefs");
+        require(!read_dataref(XSR_DATAREF_SERVICE_READY), "offline before first engine handshake");
+        wait_for_engine(true);
+        require(read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_MISSING &&
+                !read_dataref(XSR_DATAREF_PTT_BUSY), "ready engine with no model or PTT");
         draw(1);
         language = xplm_Language_English;
         draw(1);
         language = xplm_Language_Spanish;
         auto& provider_window = plugins[1].window;
+        const int default_right = provider_window.right;
+        const int default_bottom = provider_window.bottom;
+        require(default_right - provider_window.left == 620, "compact provider window");
         provider_window.right = provider_window.left + 560;
         provider_window.bottom = provider_window.top - 460;
         draw(1);
         draw(2);
+        language = xplm_Language_English;
+        draw(1);
+        click(172, 49);
+        vertices = 0;
+        draw(1);
+        const int empty_activity = vertices;
+        require(ptt_from_diagnostic().status == XSR_MODEL_UNAVAILABLE, "diagnostic subscribed to provider");
         {
             AsPlugin as(2);
-            XvrRequest request{};
-            request.version = XVR_ABI_VERSION;
-            request.struct_size = sizeof(request);
-            request.operation = XVR_PTT_BEGIN;
-            request.status = XVR_SERVICE_UNAVAILABLE;
-            XPLMSendMessageToPlugin(1, XVR_MESSAGE_REQUEST, &request);
-            require(request.status == XVR_MODEL_UNAVAILABLE, "diagnostic subscribed to provider");
             require(plugins[2].command != nullptr, "assignable command");
             plugins[2].command(nullptr, xplm_CommandBegin, plugins[2].command_data);
             plugins[2].command(nullptr, xplm_CommandEnd, plugins[2].command_data);
         }
+        draw(1);
+        vertices = 0;
+        draw(1);
+        require(vertices > empty_activity, "Activity displays rejected requests");
+        click(248, 49);
+        draw(1);
+        click(93, 91);
+        const auto copy_deadline = Clock::now() + 2s;
+        std::string report;
+        do {
+            std::ifstream file(clipboard);
+            report.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            if (report.find("MODEL_UNAVAILABLE") != std::string::npos) break;
+            std::this_thread::sleep_for(10ms);
+        } while (Clock::now() < copy_deadline);
+        require(report.find("X-Plane / SDK: 12440 / 440") != std::string::npos &&
+                report.find("MODEL_UNAVAILABLE") != std::string::npos &&
+                report.find(root.string()) == std::string::npos, "copied diagnostics contain only technical data");
+        provider_window.right = default_right;
+        provider_window.bottom = default_bottom;
+        click(48, 50);
+        draw(1);
+        click(99, 590);
+        require(!read_dataref(XSR_DATAREF_SERVICE_READY), "manual restart marks service offline");
+        wait_for_engine();
+        require(read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_MISSING &&
+                !read_dataref(XSR_DATAREF_PTT_BUSY), "idle after restart");
+        provider_window.right = provider_window.left + 560;
+        provider_window.bottom = provider_window.top - 460;
+        click(172, 49);
+        draw(1);
+        vertices = 0;
+        draw(1);
+        require(vertices > empty_activity, "manual restart preserves activity");
+        require(ptt_from_diagnostic().status == XSR_MODEL_UNAVAILABLE, "manual restart preserves subscription");
+
         for (int id : {1, 2}) {
             AsPlugin as(id);
             auto& plug = plugins[id];
             plug.disable();
             plug.enabled = false;
+            if (id == 1) {
+                require(datarefs.size() == 3 && !read_dataref(XSR_DATAREF_SERVICE_READY) &&
+                        read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_MISSING &&
+                        !read_dataref(XSR_DATAREF_PTT_BUSY), "disabled provider reports defaults");
+            }
             plug.stop();
+            require(datarefs.empty(), "datarefs unregistered at stop");
             require(plug.flight == nullptr, "flight loop unregistered");
             dlclose(plug.library);
         }
-        std::cout << "Native module lifecycle, inter-plugin command and ImGui drawing passed in the SDK test host\n";
+        std::ofstream(root / "catalog.json") << "[{\"id\":\"incomplete-entry\"}]";
+        load(1, argv[1], root / "64/lin.xpl");
+        wait_for_engine();
+        draw(1);
+        {
+            AsPlugin as(1);
+            plugins[1].disable();
+            plugins[1].enabled = false;
+            plugins[1].stop();
+            dlclose(plugins[1].library);
+        }
+        std::cout << "Native modules, PTT, datarefs, engine restart and ImGui drawing passed in the SDK test host\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

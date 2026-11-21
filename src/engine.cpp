@@ -1,4 +1,5 @@
 #include "audio.hpp"
+#include "desktop.hpp"
 #include "models.hpp"
 
 #include <transcribe.h>
@@ -13,34 +14,10 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
-#include <shobjidl.h>
 #endif
 
-namespace xvr {
+namespace xsr {
 namespace {
-
-std::string browse_folder() {
-#ifdef _WIN32
-    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return {};
-    struct Uninitialize { ~Uninitialize() { CoUninitialize(); } } uninitialize;
-    IFileDialog* raw = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
-                               IID_PPV_ARGS(&raw)))) return {};
-    const auto release = [](auto* p) { if (p) p->Release(); };
-    std::unique_ptr<IFileDialog, decltype(release)> dialog(raw, release);
-    if (FAILED(dialog->SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR)) ||
-        FAILED(dialog->Show(nullptr))) return {};
-    IShellItem* selected = nullptr;
-    if (FAILED(dialog->GetResult(&selected))) return {};
-    std::unique_ptr<IShellItem, decltype(release)> item(selected, release);
-    PWSTR path = nullptr;
-    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) return {};
-    std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> text(path, CoTaskMemFree);
-    return fs::path(text.get()).u8string();
-#else
-    return {};
-#endif
-}
 
 class Engine {
 public:
@@ -57,37 +34,16 @@ public:
             vulkan_devices_.emplace(id, ComputeDevice{device, label});
             devices.push_back({{"id", id}, {"label", label}});
         }
-        publish({{"type", "hello"}, {"protocol", 1}, {"devices", std::move(devices)}});
+        publish({{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()}, {"devices", std::move(devices)}});
         std::thread inference([&] { inference_loop(); });
         std::thread files([&] { file_loop(); });
+        std::thread downloads([&] { download_loop(); });
         Json message;
         while (read_frame(std::cin, message)) {
             const auto type = message.value("type", "");
             if (type == "shutdown") break;
-            {
-                std::lock_guard lock(mutex_);
-                if (type == "begin") {
-                    if (active_) continue;
-                    active_ = std::make_shared<Control>(message.at("session").get<uint64_t>());
-                    if (message.value("wav", "").empty()) start_capture(message, *active_);
-                    inference_.push_back({std::move(message), active_});
-                } else if (type == "end" || type == "cancel") {
-                    if (active_ && active_->id == message.at("session").get<uint64_t>()) {
-                        if (type == "end") active_->released = true;
-                        else active_->cancelled = true;
-                    }
-                } else if (type == "cancel_download") {
-                    download_cancelled_ = true;
-                } else if (type == "scan" || type == "identify" || type == "download" || type == "browse") {
-                    if (file_jobs_.size() < 8) {
-                        if (type == "download") download_cancelled_ = false;
-                        file_jobs_.push_back(std::move(message));
-                    }
-                } else if (inference_.size() < 16) {
-                    inference_.push_back({std::move(message), {}});
-                }
-            }
-            available_.notify_all();
+            auto rejection = enqueue(type, std::move(message));
+            if (!rejection.is_null()) publish(rejection);
         }
         {
             std::lock_guard lock(mutex_);
@@ -98,6 +54,7 @@ public:
         available_.notify_all();
         inference.join();
         files.join();
+        downloads.join();
         return 0;
     }
 
@@ -117,15 +74,60 @@ private:
     };
     struct Job { Json request; std::shared_ptr<Control> control; };
 
+    Json enqueue(const std::string& type, Json message) {
+        std::lock_guard lock(mutex_);
+        if (type == "begin") {
+            const auto session = message.at("session").get<uint64_t>();
+            if (active_) return {{"type", "result"}, {"session", session}, {"status", XSR_BUSY}};
+            active_ = std::make_shared<Control>(session);
+            if (message.value("wav", "").empty()) start_capture(message, *active_);
+            inference_.push_back({std::move(message), active_});
+        } else if (type == "end" || type == "cancel") {
+            if (active_ && active_->id == message.at("session").get<uint64_t>()) {
+                if (type == "end") active_->released = true;
+                else active_->cancelled = true;
+            }
+        } else if (type == "cancel_download") {
+            download_cancelled_ = true;
+        } else if (type == "download") {
+            if (download_active_) return file_error(type, message, "busy");
+            download_cancelled_ = false;
+            download_active_ = true;
+            download_job_ = std::move(message);
+        } else if (type == "scan" || type == "identify" || type == "browse" || type == "browse_wav") {
+            if (file_jobs_.size() >= 8) return file_error(type, message, "busy");
+            file_jobs_.push_back(std::move(message));
+        } else if (type == "configure" || type == "unload" || type == "microphones") {
+            // A begin or unload is a barrier between distinct configurations.
+            if (!inference_.empty() && inference_.back().request.value("type", "") == type) {
+                inference_.back().request = std::move(message);
+            } else if (inference_.size() < 16) {
+                inference_.push_back({std::move(message), {}});
+            } else if (type == "microphones") {
+                return {{"type", type}, {"items", Json::array()}, {"status", "busy"}};
+            } else {
+                return {{"type", "inference_rejected"}, {"operation", type}, {"generation", message.at("generation")}};
+            }
+        }
+        available_.notify_all();
+        return {};
+    }
+
+    static Json file_error(const std::string& type, const Json& request, const char* status) {
+        return {{"type", type}, {"ticket", request.value("ticket", uint64_t(0))}, {"status", status}};
+    }
+
     void publish(const Json& event) {
-        std::lock_guard lock(output_);
         auto text = wire_frame(event);
+        if (text.empty() && event.contains("ticket"))
+            text = wire_frame(file_error(event.at("type"), event, "too_large"));
+        std::lock_guard lock(output_);
         if (!text.empty()) std::cout << text << std::flush;
     }
 
     void state(uint32_t value) {
         Json message{{"type", "state"}, {"generation", generation_}, {"state", value}};
-        if (value == XVR_MODEL_READY) {
+        if (value == XSR_MODEL_READY) {
             message["compute"] = actual_compute_;
             message["cpu_fallback"] = requested_compute_ != "cpu" && actual_compute_ == "CPU";
         }
@@ -135,9 +137,9 @@ private:
     bool load() {
         if (model_) return true;
         if (path_.empty()) return false;
-        state(XVR_MODEL_LOADING);
+        state(XSR_MODEL_LOADING);
         if (!matches_digest(fs::u8path(path_), sha256_, stopping_)) {
-            state(XVR_MODEL_MISSING);
+            state(XSR_MODEL_MISSING);
             return false;
         }
         transcribe_model_load_params params{};
@@ -154,13 +156,13 @@ private:
             params.backend = TRANSCRIBE_BACKEND_CPU;
             params.device = nullptr;
             if (transcribe_model_load_file(path_.c_str(), &params, &candidate) != TRANSCRIBE_OK) {
-                state(XVR_MODEL_MISSING);
+                state(XSR_MODEL_MISSING);
                 return false;
             }
             actual_compute_ = "CPU";
         }
         model_.reset(candidate);
-        state(XVR_MODEL_READY);
+        state(XSR_MODEL_READY);
         return true;
     }
 
@@ -184,13 +186,13 @@ private:
                 sha256_ = std::move(sha256);
                 requested_compute_ = std::move(compute);
                 generation_ = next.request.value("generation", uint64_t(0));
-                if (path_.empty()) state(XVR_MODEL_MISSING);
-                else if (model_) state(XVR_MODEL_READY);
+                if (path_.empty()) state(XSR_MODEL_MISSING);
+                else if (model_) state(XSR_MODEL_READY);
                 else if (next.request.value("preload", false)) load();
-                else state(XVR_MODEL_UNLOADED);
+                else state(XSR_MODEL_UNLOADED);
             } else if (type == "unload" && next.request.value("generation", uint64_t(0)) == generation_) {
                 model_.reset();
-                state(path_.empty() ? XVR_MODEL_MISSING : XVR_MODEL_UNLOADED);
+                state(path_.empty() ? XSR_MODEL_MISSING : XSR_MODEL_UNLOADED);
             } else if (type == "microphones") {
                 publish({{"type", "microphones"}, {"items", microphone_list()}});
             } else if (type == "begin") {
@@ -218,27 +220,52 @@ private:
                 file_jobs_.pop_front();
             }
             const auto type = next.value("type", "");
-            const auto path = fs::u8path(next.value("path", ""));
             const auto ticket = next.value("ticket", uint64_t(0));
             try {
-                if (type == "scan") {
-                    publish({{"type", "scan"}, {"ticket", ticket},
-                             {"items", scan_models(path, next.at("catalog"), stopping_)}});
-                } else if (type == "identify") {
-                    publish({{"type", "identify"}, {"ticket", ticket},
-                             {"model", identify_model(path, next.at("catalog"), stopping_)}});
-                } else if (type == "browse") {
-                    publish({{"type", "browse"}, {"ticket", ticket}, {"path", browse_folder()}});
+                if (type == "scan" || type == "identify") {
+                    const auto path = fs::u8path(next.at("path").get<std::string>());
+                    const auto& catalog = next.at("catalog");
+                    if (type == "scan")
+                        publish({{"type", type}, {"ticket", ticket}, {"status", "ok"},
+                                 {"items", scan_models(path, catalog, stopping_)}});
+                    else
+                        publish({{"type", type}, {"ticket", ticket}, {"status", "ok"},
+                                 {"model", identify_model(path, catalog, stopping_)}});
                 } else {
-                    const auto report = [&](uint64_t bytes) {
-                        publish({{"type", "download_progress"}, {"ticket", ticket}, {"bytes", bytes}});
-                    };
-                    const auto status = download_model(path, next.at("entry"), download_cancelled_, report);
-                    publish({{"type", "download"}, {"ticket", ticket}, {"status", status}});
+                    const auto selected = browse_path(type == "browse", stopping_);
+                    publish({{"type", type}, {"ticket", ticket}, {"path", selected.path},
+                             {"status", selected.failed ? "error" : "ok"}});
                 }
             } catch (const std::exception&) {
-                publish({{"type", type}, {"ticket", ticket}, {"status", "error"}});
+                publish(file_error(type, next, "error"));
             }
+        }
+    }
+
+    void download_loop() {
+        for (;;) {
+            Json next;
+            {
+                std::unique_lock lock(mutex_);
+                available_.wait(lock, [&] { return stopping_ || download_job_.has_value(); });
+                if (stopping_) return;
+                next = std::move(*download_job_);
+                download_job_.reset();
+            }
+            const auto ticket = next.value("ticket", uint64_t(0));
+            std::string status = "error";
+            try {
+                const auto path = fs::u8path(next.at("path").get<std::string>());
+                const auto progress = [&](uint64_t bytes) {
+                    publish({{"type", "download_progress"}, {"ticket", ticket}, {"bytes", bytes}});
+                };
+                status = download_model(path, next.at("entry"), download_cancelled_, progress);
+            } catch (const std::exception&) {}
+            {
+                std::lock_guard lock(mutex_);
+                download_active_ = false;
+            }
+            publish({{"type", "download"}, {"ticket", ticket}, {"status", status}});
         }
     }
 
@@ -259,6 +286,8 @@ private:
     std::condition_variable available_;
     std::deque<Job> inference_;
     std::deque<Json> file_jobs_;
+    std::optional<Json> download_job_;
+    bool download_active_ = false;
     std::shared_ptr<Control> active_;
     std::atomic<bool> stopping_{false}, download_cancelled_{false};
     struct ComputeDevice {
@@ -274,33 +303,32 @@ private:
 
 Json Engine::transcribe(const Json& request, Control& control) {
     const auto error = [](uint32_t status) { return Json{{"status", status}}; };
-    if (request.value("generation", uint64_t(0)) != generation_) return error(XVR_MODEL_UNAVAILABLE);
-    if (control.cancelled) return error(XVR_CANCELLED);
+    if (request.value("generation", uint64_t(0)) != generation_) return error(XSR_MODEL_UNAVAILABLE);
+    if (control.cancelled) return error(XSR_CANCELLED);
     const auto sample = request.value("wav", "");
     auto& recording = control.recording;
     if (sample.empty()) {
         while (!recording.count && !recording.closed && !control.cancelled && !control.released)
             std::this_thread::sleep_for(5ms);
         if (!recording.count) {
-            if (control.cancelled) return error(XVR_CANCELLED);
-            return error(recording.error != XVR_OK ? uint32_t(recording.error) : XVR_NO_AUDIO);
+            if (control.cancelled) return error(XSR_CANCELLED);
+            return error(recording.error != XSR_OK ? uint32_t(recording.error) : XSR_NO_AUDIO);
         }
     } else {
         recording.samples = read_wav(fs::u8path(sample));
         recording.count = recording.samples.size();
-        if (!recording.count) return error(XVR_NO_AUDIO);
+        if (!recording.count) return error(XSR_BAD_REQUEST);
     }
 
-    const auto compute_start = Clock::now();
-    if (!load()) return error(XVR_MODEL_UNAVAILABLE);
-    if (control.cancelled) return error(XVR_CANCELLED);
+    if (!load()) return error(XSR_MODEL_UNAVAILABLE);
+    if (control.cancelled) return error(XSR_CANCELLED);
     transcribe_session_params session_parameters{};
     transcribe_session_params_init(&session_parameters);
     const auto cores = std::max(2u, std::thread::hardware_concurrency());
     session_parameters.n_threads = int(std::min(6u, cores / 2));
     transcribe_session* raw_session = nullptr;
     if (transcribe_session_init(model_.get(), &session_parameters, &raw_session) != TRANSCRIBE_OK)
-        return error(XVR_ENGINE_ERROR);
+        return error(XSR_ENGINE_ERROR);
     std::unique_ptr<transcribe_session, decltype(&transcribe_session_free)> session(raw_session, transcribe_session_free);
     transcribe_set_abort_callback(session.get(), +[](void* pointer) {
         return static_cast<Control*>(pointer)->cancelled.load();
@@ -309,7 +337,7 @@ Json Engine::transcribe(const Json& request, Control& control) {
     auto terms = request.value("terms", std::vector<std::string>{});
     std::vector<const char*> pointers;
     for (const auto& term : terms) pointers.push_back(term.c_str());
-    uint32_t vocabulary = XVR_VOCAB_NONE;
+    uint32_t vocabulary = XSR_VOCAB_NONE;
     transcribe_run_params params{};
     transcribe_run_params_init(&params);
     const bool streaming = request.value("early", false);
@@ -317,55 +345,67 @@ Json Engine::transcribe(const Json& request, Control& control) {
     if (!language_hint.empty() && language_hint != "auto") params.language = language_hint.c_str();
     if (!pointers.empty()) {
         const bool supported = !streaming && transcribe_model_supports(model_.get(), TRANSCRIBE_FEATURE_VOCABULARY);
-        vocabulary = supported ? XVR_VOCAB_APPLIED : XVR_VOCAB_UNSUPPORTED;
+        vocabulary = supported ? XSR_VOCAB_APPLIED : XSR_VOCAB_UNSUPPORTED;
         if (supported) {
             params.vocabulary = pointers.data();
             params.n_vocabulary = int32_t(pointers.size());
         }
     }
 
-    if (streaming && transcribe_stream_begin(session.get(), &params, nullptr) != TRANSCRIBE_OK)
-        return error(XVR_ENGINE_ERROR);
+    Clock::duration compute_time{};
+    const auto timed = [&](auto operation) {
+        const auto start = Clock::now();
+        const auto result = operation();
+        compute_time += Clock::now() - start;
+        return result;
+    };
+    if (streaming && timed([&] { return transcribe_stream_begin(session.get(), &params, nullptr); }) != TRANSCRIBE_OK)
+        return error(XSR_ENGINE_ERROR);
     size_t fed = 0;
     auto status = TRANSCRIBE_OK;
     while (sample.empty() && !recording.closed && !control.cancelled && status == TRANSCRIBE_OK) {
         const auto count = recording.count.load(std::memory_order_acquire);
         if (streaming && count - fed >= sample_rate / 4) {
-            status = transcribe_stream_feed(session.get(), recording.samples.data() + fed, int(count - fed), nullptr);
+            status = timed([&] {
+                return transcribe_stream_feed(session.get(), recording.samples.data() + fed, int(count - fed), nullptr);
+            });
             fed = count;
         } else {
             std::this_thread::sleep_for(10ms);
         }
     }
-    if (control.cancelled) return error(XVR_CANCELLED);
-    if (recording.error != XVR_OK) return error(recording.error);
+    if (control.cancelled) return error(XSR_CANCELLED);
+    if (recording.error != XSR_OK) return error(recording.error);
     const auto count = recording.count.load(std::memory_order_acquire);
-    if (!contains_audio(recording.samples.data(), count)) return error(XVR_NO_SPEECH);
-    const auto decode_start = streaming ? compute_start : Clock::now();
+    if (!contains_audio(recording.samples.data(), count)) return error(XSR_NO_SPEECH);
     if (streaming) {
-        if (status == TRANSCRIBE_OK && count > fed)
-            status = transcribe_stream_feed(session.get(), recording.samples.data() + fed, int(count - fed), nullptr);
-        if (status == TRANSCRIBE_OK) status = transcribe_stream_finalize(session.get(), nullptr);
+        if (status == TRANSCRIBE_OK && count > fed) {
+            status = timed([&] {
+                return transcribe_stream_feed(session.get(), recording.samples.data() + fed, int(count - fed), nullptr);
+            });
+        }
+        if (status == TRANSCRIBE_OK)
+            status = timed([&] { return transcribe_stream_finalize(session.get(), nullptr); });
     } else {
-        status = transcribe_run(session.get(), recording.samples.data(), int(count), &params);
+        status = timed([&] { return transcribe_run(session.get(), recording.samples.data(), int(count), &params); });
     }
-    if (control.cancelled) return error(XVR_CANCELLED);
+    if (control.cancelled) return error(XSR_CANCELLED);
     if (status == TRANSCRIBE_ERR_OUTPUT_TRUNCATED || transcribe_was_truncated(session.get()))
-        return error(XVR_OUTPUT_TRUNCATED);
-    if (status != TRANSCRIBE_OK) return error(XVR_ENGINE_ERROR);
+        return error(XSR_OUTPUT_TRUNCATED);
+    if (status != TRANSCRIBE_OK) return error(XSR_ENGINE_ERROR);
     std::string text = transcribe_full_text(session.get());
-    if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XVR_NO_SPEECH);
-    if (text.size() > max_result_size) return error(XVR_OUTPUT_TRUNCATED);
-    if (!valid_utf8(text)) return error(XVR_ENGINE_ERROR);
+    if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XSR_NO_SPEECH);
+    if (text.size() > max_result_size) return error(XSR_OUTPUT_TRUNCATED);
+    if (!valid_utf8(text)) return error(XSR_ENGINE_ERROR);
     const auto* language = transcribe_detected_language(session.get());
-    return {{"status", XVR_OK}, {"text", std::move(text)},
+    return {{"status", XSR_OK}, {"text", std::move(text)},
             {"language", language && *language ? language : params.language ? params.language : ""},
             {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
-            {"compute_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - decode_start).count()}};
+            {"compute_ms", std::chrono::duration_cast<std::chrono::milliseconds>(compute_time).count()}};
 }
 
 } // namespace
-} // namespace xvr
+} // namespace xsr
 
 int main() {
 #ifdef _WIN32
@@ -376,7 +416,7 @@ int main() {
     std::cin.tie(nullptr);
     try {
         if (transcribe_init_backends_default() != TRANSCRIBE_OK) return 1;
-        return xvr::Engine{}.run();
+        return xsr::Engine{}.run();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

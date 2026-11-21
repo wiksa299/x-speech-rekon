@@ -6,7 +6,7 @@
 #include <filesystem>
 #include <functional>
 
-namespace xvr {
+namespace xsr {
 
 const char* localized(const char* english, const char* french, const char* spanish);
 
@@ -18,7 +18,7 @@ public:
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    void show();
+    void show(const char* title);
     void hide();
     bool visible() const;
     bool pointer_pressed() const { return mouse_down_; }
@@ -40,4 +40,4 @@ private:
     float frame_time_ = 0;
 };
 
-} // namespace xvr
+} // namespace xsr

@@ -7,7 +7,7 @@
 #include <thread>
 
 namespace {
-using namespace xvr;
+using namespace xsr;
 
 class Check {
 public:
@@ -20,7 +20,7 @@ public:
           }, [&](const Delivery& message) { deliveries_.push_back(message); }) {}
 
     void start() {
-        if (!process_.start()) throw std::runtime_error("could not start xvr-engine");
+        if (!process_.start()) throw std::runtime_error("could not start xsr-engine");
         devices_ = message("hello", 5s).value("devices", Json::array());
     }
 
@@ -82,31 +82,36 @@ public:
             settings.compute = compute;
             settings.language = language;
             broker_.set_settings(settings, Clock::now());
+            const auto confirmed = Clock::now() + 5s;
+            while (!broker_.service_ready() && Clock::now() < confirmed) {
+                poll();
+                std::this_thread::sleep_for(5ms);
+            }
 
             uint64_t session = 0;
             deliveries_.clear();
             check_status(broker_.begin_local(wav.u8string(), Clock::now(), session));
-            result(session, XVR_VOCAB_NONE, name + " offline");
+            result(session, XSR_VOCAB_NONE, name + " offline");
 
             settings.early = true;
             settings.load = LoadPolicy::on_activate;
             broker_.set_settings(settings, Clock::now());
             const auto load_deadline = Clock::now() + 2s;
-            while (broker_.model_state() == XVR_MODEL_LOADING && Clock::now() < load_deadline) {
+            while (broker_.model_state() == XSR_MODEL_LOADING && Clock::now() < load_deadline) {
                 poll();
                 std::this_thread::sleep_for(5ms);
             }
-            if (broker_.model_state() != XVR_MODEL_READY)
+            if (broker_.model_state() != XSR_MODEL_READY)
                 throw std::runtime_error("loaded model did not report ready after reconfiguration: " + name);
             if (broker_.actual_compute() != expected_compute || broker_.cpu_fallback() != expected_fallback)
                 throw std::runtime_error("unexpected compute device for " + name + ": " + broker_.actual_compute());
             std::cout << "Compute device: " << expected_compute << (expected_fallback ? " (fallback)" : "") << '\n';
             injection_ = microphone ? "" : wav.u8string();
-            command(XVR_SUBSCRIBE);
-            XvrString word{"landing gear", 12};
-            command(XVR_SET_VOCABULARY, 0, &word, 1);
+            command(XSR_SUBSCRIBE);
+            XsrString word{"landing gear", 12};
+            command(XSR_SET_VOCABULARY, 0, &word, 1);
             deliveries_.clear();
-            session = command(XVR_PTT_BEGIN);
+            session = command(XSR_PTT_BEGIN);
             if (microphone) {
                 std::cout << "Speak into the default microphone for four seconds.\n" << std::flush;
                 const auto end = Clock::now() + 4s;
@@ -117,8 +122,8 @@ public:
             } else {
                 wait_for_capture(session);
             }
-            command(XVR_PTT_END, session);
-            result(session, settings.profile.supports_vocabulary(settings.early) ? XVR_VOCAB_APPLIED : XVR_VOCAB_UNSUPPORTED,
+            command(XSR_PTT_END, session);
+            result(session, settings.profile.supports_vocabulary(settings.early) ? XSR_VOCAB_APPLIED : XSR_VOCAB_UNSUPPORTED,
                    name + " PTT");
             if (microphone) return;
         }
@@ -131,7 +136,7 @@ public:
         if (entry == catalog.end()) throw std::runtime_error("Missing Tiny fixture");
         const auto original = folder / fs::u8path(entry->at("file").get<std::string>());
         const auto fixture = fs::temp_directory_path() / fs::u8path(
-            "xvr modèles " + std::to_string(Clock::now().time_since_epoch().count()));
+            "xsr modèles " + std::to_string(Clock::now().time_since_epoch().count()));
         if (!fs::create_directory(fixture)) throw std::runtime_error("cannot create test directory");
         struct RemoveFixture {
             fs::path path;
@@ -170,11 +175,11 @@ private:
         if (!process_.send(message)) throw std::runtime_error("could not send engine command");
     }
     static void check_status(uint32_t status) {
-        if (status != XVR_OK) throw std::runtime_error(status_name(status));
+        if (status != XSR_OK) throw std::runtime_error(status_name(status));
     }
-    uint64_t command(uint32_t op, uint64_t id = 0, const XvrString* terms = nullptr, uint32_t count = 0) {
-        XvrRequest request{};
-        request.version = XVR_ABI_VERSION;
+    uint64_t command(uint32_t op, uint64_t id = 0, const XsrString* terms = nullptr, uint32_t count = 0) {
+        XsrRequest request{};
+        request.version = XSR_ABI_VERSION;
         request.struct_size = sizeof(request);
         request.operation = op;
         request.session = id;
@@ -189,8 +194,8 @@ private:
         while (Clock::now() < end) {
             poll();
             for (const auto& event : deliveries_) {
-                if (event.session == session && event.kind == XVR_CAPTURE_STARTED) return;
-                if (event.session == session && event.kind == XVR_RESULT) check_status(event.status);
+                if (event.session == session && event.kind == XSR_CAPTURE_STARTED) return;
+                if (event.session == session && event.kind == XSR_RESULT) check_status(event.status);
             }
             std::this_thread::sleep_for(5ms);
         }
@@ -201,7 +206,7 @@ private:
         while (Clock::now() < end) {
             poll();
             for (const auto& event : deliveries_) {
-                if (event.session != session || event.kind != XVR_RESULT) continue;
+                if (event.session != session || event.kind != XSR_RESULT) continue;
                 check_status(event.status);
                 if (event.result.at("vocabulary") != vocabulary || event.result.value("text", "").empty())
                     throw std::runtime_error("unexpected result for " + name);
@@ -221,7 +226,7 @@ private:
                 if (event.value("protocol", 0) != 1) throw std::runtime_error("wrong engine protocol");
                 broker_.engine_online(now);
                 inbox_.push_back(event);
-            } else if (type == "state" || type == "capture" || type == "result") {
+            } else if (type == "state" || type == "capture" || type == "result" || type == "inference_rejected") {
                 broker_.accept(event, now);
             } else if (type != "level" && type != "download_progress") {
                 inbox_.push_back(event);
@@ -286,5 +291,5 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
 #endif
-    return run(std::vector<xvr::fs::path>(argv + 1, argv + argc));
+    return run(std::vector<xsr::fs::path>(argv + 1, argv + argc));
 }

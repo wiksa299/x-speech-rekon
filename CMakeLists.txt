@@ -1,0 +1,153 @@
+cmake_minimum_required(VERSION 3.24)
+project(XVoiceRekon VERSION 0.1.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    add_compile_options(/utf-8)
+endif()
+
+option(XVR_BUILD_PLUGINS "Build the native X-Plane plugins" ON)
+option(XVR_LINUX_AVX2 "Tune the Linux development engine for a CPU with AVX2 and FMA" OFF)
+set(XVR_TEST_MODELS "" CACHE PATH "Directory containing the six pinned GGUF files")
+include(CTest)
+include(FetchContent)
+find_package(Threads REQUIRED)
+
+set(TRANSCRIBE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_INSTALL OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_METAL OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_VULKAN OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_CUDA OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_USE_SYSTEM_BLAS OFF CACHE BOOL "" FORCE)
+set(TRANSCRIBE_X86_CONSERVATIVE ON CACHE BOOL "" FORCE)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+if(WIN32)
+    set(TRANSCRIBE_BUILD_SHARED ON CACHE BOOL "" FORCE)
+    set(TRANSCRIBE_GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
+    set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+else()
+    foreach(flag IN ITEMS SSE42 AVX AVX2 F16C FMA BMI2)
+        set(GGML_${flag} ${XVR_LINUX_AVX2} CACHE BOOL "" FORCE)
+    endforeach()
+endif()
+
+FetchContent_Declare(transcribe URL https://codeload.github.com/handy-computer/transcribe.cpp/tar.gz/cfa237c2551a4b2d3a56ff8fe5461e3c67c51772)
+FetchContent_Declare(json URL https://codeload.github.com/nlohmann/json/tar.gz/55f93686c01528224f448c19128836e7df245f72)
+FetchContent_Declare(miniaudio URL https://codeload.github.com/mackron/miniaudio/tar.gz/877ea4a7c2601c7b0f2a44e83dfac42e6470fea6 SOURCE_SUBDIR xvr-header-only)
+FetchContent_MakeAvailable(transcribe json miniaudio)
+# The pinned upstream build uses CMAKE_SOURCE_DIR for this public include.
+target_include_directories(transcribe PUBLIC "${transcribe_SOURCE_DIR}/include")
+
+add_library(xvr_core STATIC src/core.cpp src/process.cpp)
+target_include_directories(xvr_core PUBLIC include src)
+target_link_libraries(xvr_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
+if(WIN32)
+    target_compile_definitions(xvr_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
+add_executable(xvr-engine src/engine.cpp src/models.cpp src/audio.cpp)
+target_include_directories(xvr-engine PRIVATE "${miniaudio_SOURCE_DIR}")
+target_link_libraries(xvr-engine PRIVATE xvr_core transcribe ggml ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(xvr-engine PRIVATE winhttp bcrypt ole32 uuid)
+    set_target_properties(xvr-engine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+    target_link_libraries(xvr-engine PRIVATE PkgConfig::LIBCURL OpenSSL::Crypto)
+endif()
+
+add_executable(xvr-check src/check.cpp)
+target_link_libraries(xvr-check PRIVATE xvr_core)
+
+if(XVR_BUILD_PLUGINS)
+    FetchContent_Declare(xpsdk URL https://codeload.github.com/X-Plane/xpsdk/tar.gz/ed88aed734106466436ba9efd9a87332fbd9808e)
+    FetchContent_Declare(imgui URL https://codeload.github.com/ocornut/imgui/tar.gz/f5befd2d29e66809cd1110a152e375a7f1981f06)
+    FetchContent_MakeAvailable(xpsdk imgui)
+    add_library(xvr_imgui STATIC
+        "${imgui_SOURCE_DIR}/imgui.cpp"
+        "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+        "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+        "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+        src/window.cpp)
+    target_include_directories(xvr_imgui PUBLIC src
+        "${imgui_SOURCE_DIR}" "${xpsdk_SOURCE_DIR}/CHeaders/XPLM")
+    target_compile_definitions(xvr_imgui PUBLIC
+        XPLM200=1 XPLM210=1 XPLM300=1 XPLM301=1 XPLM303=1 XPLM400=1 XPLM411=1 XPLM420=1 XPLM430=1 XPLM440=1)
+    if(WIN32)
+        target_compile_definitions(xvr_imgui PUBLIC IBM=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(xvr_imgui PUBLIC "${xpsdk_SOURCE_DIR}/Libraries/Win/XPLM_64.lib")
+        set(xvr_plugin_binary win)
+    elseif(UNIX AND NOT APPLE)
+        target_compile_definitions(xvr_imgui PUBLIC LIN=1)
+        set(xvr_plugin_binary lin)
+    else()
+        message(FATAL_ERROR "This milestone targets Windows packages and Linux development")
+    endif()
+
+    foreach(plugin IN ITEMS provider diagnostic)
+        add_library(xvr-${plugin} MODULE src/${plugin}.cpp)
+        target_link_libraries(xvr-${plugin} PRIVATE xvr_core xvr_imgui)
+        set_target_properties(xvr-${plugin} PROPERTIES
+            PREFIX "" SUFFIX ".xpl" OUTPUT_NAME "${xvr_plugin_binary}"
+            LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/plugins/${plugin}"
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/plugins/${plugin}")
+    endforeach()
+    if(WIN32)
+        target_link_libraries(xvr-provider PRIVATE ole32 uuid)
+        install(TARGETS xvr-provider LIBRARY DESTINATION X-Voice-Rekon/64 COMPONENT xvr
+            RUNTIME DESTINATION X-Voice-Rekon/64 COMPONENT xvr)
+        install(TARGETS xvr-diagnostic LIBRARY DESTINATION X-Voice-Rekon-Diagnostic/64 COMPONENT xvr
+            RUNTIME DESTINATION X-Voice-Rekon-Diagnostic/64 COMPONENT xvr)
+        install(TARGETS xvr-engine transcribe ggml ggml-base RUNTIME DESTINATION X-Voice-Rekon/bin COMPONENT xvr)
+        get_property(ggml_targets DIRECTORY "${transcribe_SOURCE_DIR}/ggml/src" PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(backend IN LISTS ggml_targets)
+            get_target_property(kind ${backend} TYPE)
+            if(kind STREQUAL "MODULE_LIBRARY" AND backend MATCHES "^ggml-cpu-")
+                install(FILES "$<TARGET_FILE:${backend}>" DESTINATION X-Voice-Rekon/bin COMPONENT xvr)
+            endif()
+        endforeach()
+        install(TARGETS xvr-check RUNTIME DESTINATION tools COMPONENT xvr)
+        install(FILES assets/catalog.json assets/test-en.wav assets/test-fr.wav assets/test-es.wav
+            DESTINATION X-Voice-Rekon COMPONENT xvr)
+        install(FILES include/xvoice_rekon.h LICENSE README.md
+            DESTINATION . COMPONENT xvr)
+        install(FILES "${transcribe_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME transcribe.cpp.txt COMPONENT xvr)
+        install(FILES "${transcribe_SOURCE_DIR}/ggml/LICENSE" DESTINATION licenses RENAME ggml.txt COMPONENT xvr)
+        install(FILES "${transcribe_SOURCE_DIR}/THIRD-PARTY-LICENSES.md" DESTINATION licenses COMPONENT xvr)
+        install(FILES "${miniaudio_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME miniaudio.txt COMPONENT xvr)
+        install(FILES "${json_SOURCE_DIR}/LICENSE.MIT" DESTINATION licenses RENAME nlohmann-json.txt COMPONENT xvr)
+        install(FILES "${imgui_SOURCE_DIR}/LICENSE.txt" DESTINATION licenses RENAME dear-imgui.txt COMPONENT xvr)
+        install(FILES assets/MODEL-NOTICES.md DESTINATION licenses COMPONENT xvr)
+    endif()
+endif()
+
+if(BUILD_TESTING)
+    add_executable(xvr-tests tests/core.cpp)
+    target_link_libraries(xvr-tests PRIVATE xvr_core)
+    add_test(NAME core COMMAND xvr-tests)
+    add_test(NAME engine-process COMMAND xvr-check --engine $<TARGET_FILE:xvr-engine> --probe)
+    if(XVR_BUILD_PLUGINS AND UNIX AND NOT APPLE)
+        add_executable(xvr-native-host tests/native_host.cpp)
+        set_target_properties(xvr-native-host PROPERTIES ENABLE_EXPORTS ON CXX_VISIBILITY_PRESET default)
+        target_link_libraries(xvr-native-host PRIVATE xvr_core xvr_imgui ${CMAKE_DL_LIBS})
+        add_test(NAME native-sdk-host COMMAND xvr-native-host
+            $<TARGET_FILE:xvr-provider> $<TARGET_FILE:xvr-diagnostic>
+            $<TARGET_FILE:xvr-engine> "${PROJECT_SOURCE_DIR}/assets/catalog.json")
+    endif()
+    if(XVR_TEST_MODELS)
+        add_test(NAME real-models COMMAND xvr-check --engine $<TARGET_FILE:xvr-engine>
+            --catalog "${PROJECT_SOURCE_DIR}/assets/catalog.json"
+            --models "${XVR_TEST_MODELS}" --verify-files --wav "${PROJECT_SOURCE_DIR}/assets/test-en.wav")
+        set_tests_properties(real-models PROPERTIES TIMEOUT 300 LABELS real-models)
+    endif()
+endif()

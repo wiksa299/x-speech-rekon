@@ -1,0 +1,7 @@
+/build/
+/dist/
+/SPEC.md
+/PLAN.md
+/mockup-x-voice-rekon.html
+*.gguf
+*.part

@@ -1,0 +1,68 @@
+[
+  {
+    "id": "moonshine-streaming-tiny",
+    "quant": "Q8_0",
+    "revision": "4125c28c22a76494162094ab3566387cd92fb2f5",
+    "file": "moonshine-streaming-tiny-Q8_0.gguf",
+    "bytes": 50462816,
+    "sha256": "930e4622ad3a24158b91406c30c977fa6a26b34cb32d6ac3e57cfb23383a869e",
+    "urls": [
+      "https://huggingface.co/handy-computer/moonshine-streaming-tiny-gguf/resolve/4125c28c22a76494162094ab3566387cd92fb2f5/moonshine-streaming-tiny-Q8_0.gguf"
+    ]
+  },
+  {
+    "id": "moonshine-streaming-small",
+    "quant": "Q8_0",
+    "revision": "e53f28b0cb90308390c852068b950a1aadd238b0",
+    "file": "moonshine-streaming-small-Q8_0.gguf",
+    "bytes": 198506848,
+    "sha256": "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
+    "urls": [
+      "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf"
+    ]
+  },
+  {
+    "id": "moonshine-streaming-medium",
+    "quant": "Q8_0",
+    "revision": "56302cde2ae162d1357a833d91775bcd06e91e1b",
+    "file": "moonshine-streaming-medium-Q8_0.gguf",
+    "bytes": 295793568,
+    "sha256": "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+    "urls": [
+      "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-Q8_0.gguf"
+    ]
+  },
+  {
+    "id": "parakeet-tdt-0.6b-v3",
+    "quant": "Q4_K_M",
+    "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
+    "file": "parakeet-tdt-0.6b-v3-Q4_K_M.gguf",
+    "bytes": 485425504,
+    "sha256": "b68557be1e3c40207fd7c4bd9d63f1d3316b963f15325bfb0cc16a8bb0ffd181",
+    "urls": [
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q4_K_M.gguf"
+    ]
+  },
+  {
+    "id": "parakeet-tdt-0.6b-v3",
+    "quant": "Q6_K",
+    "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
+    "file": "parakeet-tdt-0.6b-v3-Q6_K.gguf",
+    "bytes": 610342240,
+    "sha256": "ab1bbcbe3e1c4c2ec12ca1df1aeafd22e9043ce7262e4b5f5c5d7d76418a9ae8",
+    "urls": [
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q6_K.gguf"
+    ]
+  },
+  {
+    "id": "parakeet-tdt-0.6b-v3",
+    "quant": "Q8_0",
+    "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
+    "file": "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+    "bytes": 739508576,
+    "sha256": "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
+    "urls": [
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+    ]
+  }
+]

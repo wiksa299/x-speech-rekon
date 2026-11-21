@@ -1,0 +1,140 @@
+#pragma once
+
+#include "xvoice_rekon.h"
+#include <nlohmann/json.hpp>
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace xvr {
+
+using Json = nlohmann::json;
+namespace fs = std::filesystem;
+using Clock = std::chrono::steady_clock;
+using namespace std::chrono_literals;
+
+constexpr size_t max_frame = 65536;
+constexpr int local_client = -2;
+constexpr uint32_t sample_rate = 16000;
+constexpr uint32_t max_samples = 30 * sample_rate;
+constexpr uint32_t max_result_size = XVR_MAX_TEXT_BYTES;
+
+std::string status_name(uint32_t status);
+bool valid_utf8(std::string_view input);
+bool read_frame(std::istream& stream, Json& message);
+std::string wire_frame(const Json& message);
+
+class Process {
+public:
+    explicit Process(fs::path executable);
+    ~Process();
+    Process(const Process&) = delete;
+    Process& operator=(const Process&) = delete;
+    bool start();
+    bool send(const Json& message);
+    std::vector<Json> receive();
+    bool failed() const;
+    void stop();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+struct Profile {
+    std::string id;
+    std::string quant;
+    std::string revision;
+    std::string path;
+    std::string sha256;
+    bool supports_vocabulary() const { return id == "parakeet-tdt-0.6b-v3"; }
+    bool streaming() const { return id.rfind("moonshine-streaming-", 0) == 0; }
+    bool available() const { return !path.empty(); }
+};
+
+enum class LoadPolicy { on_use, on_activate };
+enum class UnloadPolicy { after_use, on_deactivate, after_idle };
+
+struct Settings {
+    Profile profile;
+    std::string microphone;
+    LoadPolicy load = LoadPolicy::on_use;
+    UnloadPolicy unload = UnloadPolicy::after_idle;
+    int idle_minutes = 5;
+    bool early = false;
+};
+
+struct Delivery {
+    int client;
+    uint32_t kind;
+    uint32_t status;
+    uint64_t session;
+    uint32_t stage = XVR_STAGE_NONE;
+    Json result = Json::object();
+};
+
+class Broker {
+public:
+    using Send = std::function<bool(const Json&)>;
+    using Deliver = std::function<void(const Delivery&)>;
+    Broker(Send send, Deliver deliver);
+    void request(int sender, XvrRequest& request, Clock::time_point now);
+    void accept(const Json& event, Clock::time_point now);
+    void tick(Clock::time_point now);
+    void set_settings(Settings settings, Clock::time_point now);
+    void engine_online(Clock::time_point now);
+    void engine_lost(Clock::time_point now);
+    void shutdown(Clock::time_point now);
+    void forget(int client, Clock::time_point now);
+    uint32_t begin_local(std::string wav, Clock::time_point now, uint64_t& session);
+    uint32_t end_local(uint64_t session, Clock::time_point now);
+    void cancel_local(Clock::time_point now);
+    bool busy() const { return active_.has_value(); }
+    bool ready() const { return ready_; }
+    bool restart_due(Clock::time_point now) const { return draining_ && now >= drain_deadline_; }
+    uint32_t model_state() const { return model_state_; }
+    const Settings& settings() const { return settings_; }
+    const std::map<int, std::vector<std::string>>& subscribers() const { return subscribers_; }
+
+private:
+    struct Session {
+        int client;
+        uint64_t id;
+        Clock::time_point accepted;
+        Clock::time_point deadline;
+        Profile profile;
+        bool captured = false;
+        bool released = false;
+    };
+
+    uint32_t begin(int client, std::string wav, Clock::time_point now, uint64_t& session);
+    uint32_t release(int client, uint64_t session, Clock::time_point now);
+    void finish(uint32_t status, uint32_t stage, Json result, Clock::time_point now);
+    void configure(Clock::time_point now);
+    void status(XvrRequest&) const;
+
+    Send send_;
+    Deliver deliver_;
+    Settings settings_;
+    std::optional<Settings> pending_;
+    std::optional<Profile> previous_;
+    std::optional<Session> active_;
+    std::map<int, std::vector<std::string>> subscribers_;
+    Clock::time_point last_use_{};
+    uint64_t next_session_ = 0;
+    uint64_t generation_ = 0;
+    uint32_t model_state_ = XVR_MODEL_MISSING;
+    bool ready_ = false;
+    bool draining_ = false;
+    Clock::time_point drain_deadline_{};
+};
+
+} // namespace xvr

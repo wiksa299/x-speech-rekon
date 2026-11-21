@@ -1,0 +1,5 @@
+# Provenance des modèles et des échantillons
+
+- **Moonshine Streaming** Tiny, Small et Medium. Poids originaux de Useful Sensors, Inc. (Moonshine AI) sous licence [MIT](https://moonshine-voice.readthedocs.io/en/stable/license/), convertis et quantifiés en GGUF Q8_0 par Handy pour transcribe.cpp. Notices amont [Tiny](https://huggingface.co/handy-computer/moonshine-streaming-tiny-gguf) · [Small](https://huggingface.co/handy-computer/moonshine-streaming-small-gguf) · [Medium](https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf).
+- **Parakeet TDT 0.6B v3**. Poids originaux de [NVIDIA Corporation](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) sous licence [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), convertis et quantifiés en GGUF par [Handy](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf).
+- **WAV de test**. Phrases originales synthétisées localement avec Saywell et ses profils anglais, français et espagnol, graine 23. Fichiers convertis en PCM signé 16 bits, mono, 16 kHz. Saywell est utilisé pour produire les échantillons. Le paquet distribue seulement les WAV.

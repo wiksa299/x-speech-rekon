@@ -1,16 +1,20 @@
 # X‑Voice‑Rekon
 
-X‑Voice‑Rekon is a native plugin for X‑Plane 12.4.4 or later. It runs AI speech recognition locally with Moonshine Streaming or Parakeet v3 and exposes a push-to-talk (PTT) API to other plugins. The first preview targets 64-bit Windows and CPU inference.
+X‑Voice‑Rekon is a native plugin for X‑Plane 12.4.4 or later. It runs AI speech recognition locally with Moonshine Streaming, Parakeet v3 or Nemotron 3.5 Streaming and exposes a push-to-talk (PTT) API to other plugins. The 64-bit Windows build uses the CPU by default and offers Vulkan on compatible GPUs.
 
 ## Install and test on Windows
 
 1. Close X‑Plane. Extract the `X-Voice-Rekon` and `X-Voice-Rekon-Diagnostic` folders from the ZIP directly into `Resources/plugins`.
-2. Start X‑Plane. Open **Plugins → X-Voice-Rekon → Settings**. Browse to your models folder or download Parakeet v3 Q8_0. Apply the model when it appears as available.
-3. Select **Test model**. Then hold the microphone test button, speak and release it. The transcript appears in the settings window.
+2. Start X‑Plane. Open **Plugins → X-Voice-Rekon → Settings**. Expand **Models folder** to find local models, or download Parakeet v3 Q8_0. Apply the model when it appears as available.
+3. Under **Recognition test**, select **Test with a recording**. Then use **Hold to talk**, speak and release the button. Both tests show their results under **Transcript**.
 4. In X‑Plane's command settings, bind a key or button to `xvoice_rekon/diagnostic/ptt`. Open the diagnostic window, use the command and check the transcript and model identity. Verify that an existing Space binding still works while the settings window is open.
 5. Disable and re-enable X‑Voice‑Rekon in the Plugin Admin. Check that the diagnostic plugin reconnects. Quit X‑Plane and verify that `xvr-engine.exe` exits.
 
 When reporting a problem, include the Windows and X‑Plane versions, the model and quantization, the displayed status, and the X‑Voice‑Rekon lines from `Log.txt`. Technical logs record status codes and timings.
+
+Select a Vulkan adapter under **Compute device** to try GPU inference. The status line shows the device that loaded the model, including CPU fallback if the adapter disappeared or the model failed to load on it. A compatible graphics driver provides the Vulkan runtime.
+
+Nemotron 3.5 Streaming is available in Q4_K_M, Q6_K and Q8_0. It detects the language by default and can be set to English, French or Spanish. **Early decoding** starts transcription while PTT is held. With Nemotron, subscriber vocabulary is available when decoding after release.
 
 ## Build and test without the simulator
 
@@ -22,7 +26,7 @@ cmake --build build/dev
 ctest --test-dir build/dev --output-on-failure
 ```
 
-Use the helper to download or verify all six model variants and test file transcription and WAV-driven PTT.
+Use the helper to download or verify the catalog model variants and test file transcription and WAV-driven PTT.
 
 ```sh
 build/dev/xvr-check --engine build/dev/xvr-engine --catalog assets/catalog.json \
@@ -31,7 +35,7 @@ build/dev/xvr-check --engine build/dev/xvr-engine --catalog assets/catalog.json 
 
 Add `-DXVR_TEST_MODELS=/path/to/models` when configuring CMake to include that test in CTest. Use `--mic --profile parakeet-tdt-0.6b-v3/Q8_0` to test a real microphone. The other tests run without a microphone or X‑Plane. The Windows settings window uses the native folder picker.
 
-On an AVX2-capable Linux development machine, the tested configuration uses `-DXVR_LINUX_AVX2=ON`. The Windows ZIP automatically selects a compatible ggml CPU backend. The generic backend can exceed the transcription time limits on slower processors.
+On an AVX2-capable Linux development machine, the tested configuration uses `-DXVR_LINUX_AVX2=ON`. Build with `-DXVR_VULKAN=ON` and provide Vulkan headers, the loader library, `glslc` and the SPIRV-Headers CMake package. Pass `--compute vulkan` to `xvr-check` to test the first detected adapter. The Windows ZIP automatically selects a compatible ggml CPU backend. The generic backend can exceed the transcription time limits on slower processors.
 
 ## Plugin API and downloads
 

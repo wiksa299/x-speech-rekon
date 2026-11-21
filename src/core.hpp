@@ -49,14 +49,17 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+inline constexpr char nemotron_id[] = "nemotron-3.5-asr-streaming-0.6b";
+
 struct Profile {
     std::string id;
     std::string quant;
     std::string revision;
     std::string path;
     std::string sha256;
-    bool supports_vocabulary() const { return id == "parakeet-tdt-0.6b-v3"; }
-    bool streaming() const { return id.rfind("moonshine-streaming-", 0) == 0; }
+    bool nemotron() const { return id == nemotron_id; }
+    bool supports_vocabulary(bool early = false) const { return id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early); }
+    bool streaming() const { return nemotron() || id.rfind("moonshine-streaming-", 0) == 0; }
     bool available() const { return !path.empty(); }
 };
 
@@ -66,6 +69,8 @@ enum class UnloadPolicy { after_use, on_deactivate, after_idle };
 struct Settings {
     Profile profile;
     std::string microphone;
+    std::string compute = "cpu";
+    std::string language = "auto";
     LoadPolicy load = LoadPolicy::on_use;
     UnloadPolicy unload = UnloadPolicy::after_idle;
     int idle_minutes = 5;
@@ -101,6 +106,8 @@ public:
     bool ready() const { return ready_; }
     bool restart_due(Clock::time_point now) const { return draining_ && now >= drain_deadline_; }
     uint32_t model_state() const { return model_state_; }
+    const std::string& actual_compute() const { return actual_compute_; }
+    bool cpu_fallback() const { return cpu_fallback_; }
     const Settings& settings() const { return settings_; }
     const std::map<int, std::vector<std::string>>& subscribers() const { return subscribers_; }
 
@@ -132,6 +139,8 @@ private:
     uint64_t next_session_ = 0;
     uint64_t generation_ = 0;
     uint32_t model_state_ = XVR_MODEL_MISSING;
+    std::string actual_compute_;
+    bool cpu_fallback_ = false;
     bool ready_ = false;
     bool draining_ = false;
     Clock::time_point drain_deadline_{};

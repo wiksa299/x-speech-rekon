@@ -105,6 +105,7 @@ Json inspect(const fs::path& path, const Json& catalog) {
     const auto variant = meta(gguf, "stt.variant");
     std::string id;
     if (architecture == "parakeet" && variant == "tdt-0.6b-v3") id = "parakeet-tdt-0.6b-v3";
+    if (architecture == "parakeet" && variant == nemotron_id) id = nemotron_id;
     if (architecture == "moonshine_streaming" && variant.rfind("moonshine-streaming-", 0) == 0) id = variant;
     const auto type_key = gguf_find_key(gguf, "general.file_type");
     const uint32_t type = type_key >= 0 && gguf_get_kv_type(gguf, type_key) == GGUF_TYPE_UINT32 ?

@@ -64,5 +64,38 @@
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q8_0.gguf"
     ]
+  },
+  {
+    "id": "nemotron-3.5-asr-streaming-0.6b",
+    "quant": "Q4_K_M",
+    "revision": "53ce288f69326b415aeef030cfcb02a08a8096dd",
+    "file": "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
+    "bytes": 495831520,
+    "sha256": "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
+    "urls": [
+      "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf"
+    ]
+  },
+  {
+    "id": "nemotron-3.5-asr-streaming-0.6b",
+    "quant": "Q6_K",
+    "revision": "53ce288f69326b415aeef030cfcb02a08a8096dd",
+    "file": "nemotron-3.5-asr-streaming-0.6b-Q6_K.gguf",
+    "bytes": 621356512,
+    "sha256": "4ff802c6207c4a7df23242003fd2aa849a1ab02bba6bc80c3db02e7e82606c28",
+    "urls": [
+      "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q6_K.gguf"
+    ]
+  },
+  {
+    "id": "nemotron-3.5-asr-streaming-0.6b",
+    "quant": "Q8_0",
+    "revision": "53ce288f69326b415aeef030cfcb02a08a8096dd",
+    "file": "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+    "bytes": 751094240,
+    "sha256": "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+    "urls": [
+      "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
+    ]
   }
 ]

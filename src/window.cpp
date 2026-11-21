@@ -30,7 +30,8 @@ private:
 };
 }
 
-Window::Window(std::function<void()> draw) : draw_content_(std::move(draw)) {
+Window::Window(std::function<void()> draw, int width, int height, const std::filesystem::path& fallback_font)
+    : draw_content_(std::move(draw)) {
     const auto previous = ImGui::GetCurrentContext();
     imgui_ = ImGui::CreateContext();
     ImGui::SetCurrentContext(previous);
@@ -40,10 +41,33 @@ Window::Window(std::function<void()> draw) : draw_content_(std::move(draw)) {
         io.IniFilename = nullptr;
         io.LogFilename = nullptr;
         io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+        ImFontConfig font;
+        font.SizePixels = 16;
+        if (!fallback_font.empty()) {
+            char simulator_path[1024]{};
+            XPLMGetSystemPath(simulator_path);
+            const auto roboto = std::filesystem::u8path(simulator_path) / "Resources/fonts/Roboto-Regular.ttf";
+            static constexpr ImWchar ranges[] = {0x0020, 0x052f, 0x2000, 0x206f, 0};
+            for (const auto& path : {roboto, fallback_font}) {
+                std::error_code error;
+                if (std::filesystem::is_regular_file(path, error) &&
+                    io.Fonts->AddFontFromFileTTF(path.u8string().c_str(), font.SizePixels, &font, ranges)) break;
+            }
+        }
+        if (io.Fonts->Fonts.empty()) io.Fonts->AddFontDefault(&font);
         auto& style = ImGui::GetStyle();
-        style.WindowPadding = {14, 12};
+        style.WindowPadding = {16, 14};
+        style.FramePadding = {9, 5};
+        style.ItemSpacing = {9, 8};
+        style.CellPadding = {10, 6};
         style.FrameRounding = 3;
         style.WindowRounding = 0;
+        style.Colors[ImGuiCol_WindowBg] = {0.14f, 0.14f, 0.15f, 1};
+        style.Colors[ImGuiCol_ChildBg] = {0.10f, 0.10f, 0.11f, 1};
+        style.Colors[ImGuiCol_Text] = {0.95f, 0.96f, 0.98f, 1};
+        style.Colors[ImGuiCol_TextDisabled] = {0.64f, 0.67f, 0.72f, 1};
+        style.Colors[ImGuiCol_Header] = {0.18f, 0.27f, 0.40f, 1};
+        style.Colors[ImGuiCol_Button] = {0.19f, 0.29f, 0.44f, 1};
     }
 
     int left, top, right, bottom;
@@ -52,8 +76,8 @@ Window::Window(std::function<void()> draw) : draw_content_(std::move(draw)) {
     params.structSize = sizeof(params);
     params.left = left + 55;
     params.top = top - 75;
-    params.right = std::min(right - 12, params.left + 690);
-    params.bottom = std::max(bottom + 12, params.top - 680);
+    params.right = std::min(right - 12, params.left + width);
+    params.bottom = std::max(bottom + 12, params.top - height);
     params.visible = 0;
     params.drawWindowFunc = draw_cb;
     params.handleMouseClickFunc = click_cb;

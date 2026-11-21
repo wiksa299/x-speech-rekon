@@ -1,3 +1,5 @@
+param([switch]$RequireVulkan)
+
 $ErrorActionPreference = 'Stop'
 $stage = Resolve-Path dist/stage
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -7,6 +9,9 @@ $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" |
 if (!$dumpbin) { throw 'Visual Studio dumpbin is unavailable' }
 
 $engineFolder = Join-Path $stage 'X-Voice-Rekon/bin'
+if ($RequireVulkan -and !(Get-ChildItem $engineFolder -Filter '*ggml-vulkan.dll')) {
+    throw 'Expected the Vulkan backend module'
+}
 $cpuBackends = Get-ChildItem $engineFolder -Filter '*ggml-cpu-*.dll'
 if (-not ($cpuBackends.Name -match 'x64\.dll$') -or -not ($cpuBackends.Name -match 'haswell\.dll$')) {
     throw 'Expected both baseline and AVX2 CPU backends'
@@ -23,6 +28,9 @@ foreach ($file in $files) {
     if ($LASTEXITCODE -or -not ($info -match '8664 machine')) { throw "Expected x86-64 PE at $file" }
     if ($info -match '(?i)\b(?:vcruntime|msvcp|libgcc|libstdc\+\+|libcurl|libcrypto)[\w+.-]*\.dll\b') {
         throw "Unexpected redistributable DLL dependency at $file"
+    }
+    if ($file -notmatch 'ggml-vulkan\.dll$' -and $info -match '(?i)\bvulkan-1\.dll\b') {
+        throw "Vulkan must remain an optional dependency at $file"
     }
     if ($file.EndsWith('.xpl')) {
         $exports = & $dumpbin.FullName /exports $binary
@@ -45,8 +53,13 @@ $verifier = Join-Path $check 'tools/xvr-check.exe'
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --fetch --verify-files --wav (Join-Path $plugin 'test-en.wav')
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+& $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --wav (Join-Path $plugin 'test-en.wav') --profile moonshine-streaming-tiny/Q8_0 --compute vulkan/ci-unavailable
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 foreach ($locale in 'fr','es') {
     & $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --wav (Join-Path $plugin "test-$locale.wav") --profile parakeet-tdt-0.6b-v3/Q8_0
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    $recognitionLocale = @{ fr = 'fr-FR'; es = 'es-ES' }[$locale]
+    & $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --wav (Join-Path $plugin "test-$locale.wav") --profile nemotron-3.5-asr-streaming-0.6b/Q8_0 --language $recognitionLocale
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }
 

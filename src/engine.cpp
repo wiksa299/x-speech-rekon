@@ -45,7 +45,19 @@ std::string browse_folder() {
 class Engine {
 public:
     int run() {
-        publish({{"type", "hello"}, {"protocol", 1}});
+        Json devices = Json::array();
+        for (int i = 0; i < transcribe_device_count(); ++i) {
+            const auto device = transcribe_device_get(i);
+            transcribe_device_info info{};
+            transcribe_device_info_init(&info);
+            if (transcribe_device_get_info(device, &info) != TRANSCRIBE_OK || !info.kind ||
+                std::string_view(info.kind) != "vulkan" || info.device_type == TRANSCRIBE_DEVICE_TYPE_CPU) continue;
+            const auto id = std::string("vulkan/") + (info.device_id && *info.device_id ? info.device_id : info.name);
+            const auto label = std::string("Vulkan · ") + (info.description && *info.description ? info.description : info.name);
+            vulkan_devices_.emplace(id, ComputeDevice{device, label});
+            devices.push_back({{"id", id}, {"label", label}});
+        }
+        publish({{"type", "hello"}, {"protocol", 1}, {"devices", std::move(devices)}});
         std::thread inference([&] { inference_loop(); });
         std::thread files([&] { file_loop(); });
         Json message;
@@ -112,7 +124,12 @@ private:
     }
 
     void state(uint32_t value) {
-        publish({{"type", "state"}, {"generation", generation_}, {"state", value}});
+        Json message{{"type", "state"}, {"generation", generation_}, {"state", value}};
+        if (value == XVR_MODEL_READY) {
+            message["compute"] = actual_compute_;
+            message["cpu_fallback"] = requested_compute_ != "cpu" && actual_compute_ == "CPU";
+        }
+        publish(message);
     }
 
     bool load() {
@@ -125,11 +142,22 @@ private:
         }
         transcribe_model_load_params params{};
         transcribe_model_load_params_init(&params);
-        params.backend = TRANSCRIBE_BACKEND_CPU;
         transcribe_model* candidate = nullptr;
-        if (transcribe_model_load_file(path_.c_str(), &params, &candidate) != TRANSCRIBE_OK) {
-            state(XVR_MODEL_MISSING);
-            return false;
+        const auto gpu = vulkan_devices_.find(requested_compute_);
+        if (gpu != vulkan_devices_.end()) {
+            params.backend = TRANSCRIBE_BACKEND_VULKAN;
+            params.device = gpu->second.handle;
+            if (transcribe_model_load_file(path_.c_str(), &params, &candidate) == TRANSCRIBE_OK)
+                actual_compute_ = gpu->second.label;
+        }
+        if (!candidate) {
+            params.backend = TRANSCRIBE_BACKEND_CPU;
+            params.device = nullptr;
+            if (transcribe_model_load_file(path_.c_str(), &params, &candidate) != TRANSCRIBE_OK) {
+                state(XVR_MODEL_MISSING);
+                return false;
+            }
+            actual_compute_ = "CPU";
         }
         model_.reset(candidate);
         state(XVR_MODEL_READY);
@@ -150,14 +178,16 @@ private:
             if (type == "configure") {
                 auto path = next.request.value("path", "");
                 auto sha256 = next.request.value("sha256", "");
-                if (path != path_ || sha256 != sha256_) model_.reset();
+                auto compute = next.request.value("compute", "cpu");
+                if (path != path_ || sha256 != sha256_ || compute != requested_compute_) model_.reset();
                 path_ = std::move(path);
                 sha256_ = std::move(sha256);
+                requested_compute_ = std::move(compute);
                 generation_ = next.request.value("generation", uint64_t(0));
-                if (!next.request.value("preload", false) || !load()) {
-                    state(path_.empty() ? XVR_MODEL_MISSING : model_ ? XVR_MODEL_READY :
-                        next.request.value("preload", false) ? XVR_MODEL_MISSING : XVR_MODEL_UNLOADED);
-                }
+                if (path_.empty()) state(XVR_MODEL_MISSING);
+                else if (model_) state(XVR_MODEL_READY);
+                else if (next.request.value("preload", false)) load();
+                else state(XVR_MODEL_UNLOADED);
             } else if (type == "unload" && next.request.value("generation", uint64_t(0)) == generation_) {
                 model_.reset();
                 state(path_.empty() ? XVR_MODEL_MISSING : XVR_MODEL_UNLOADED);
@@ -231,8 +261,14 @@ private:
     std::deque<Json> file_jobs_;
     std::shared_ptr<Control> active_;
     std::atomic<bool> stopping_{false}, download_cancelled_{false};
+    struct ComputeDevice {
+        transcribe_device_t handle;
+        std::string label;
+    };
+    std::map<std::string, ComputeDevice> vulkan_devices_;
     std::unique_ptr<transcribe_model, decltype(&transcribe_model_free)> model_{nullptr, transcribe_model_free};
     std::string path_, sha256_;
+    std::string requested_compute_ = "cpu", actual_compute_;
     uint64_t generation_ = 0;
 };
 
@@ -276,8 +312,11 @@ Json Engine::transcribe(const Json& request, Control& control) {
     uint32_t vocabulary = XVR_VOCAB_NONE;
     transcribe_run_params params{};
     transcribe_run_params_init(&params);
+    const bool streaming = request.value("early", false);
+    const auto language_hint = request.value("language", "");
+    if (!language_hint.empty() && language_hint != "auto") params.language = language_hint.c_str();
     if (!pointers.empty()) {
-        const bool supported = transcribe_model_supports(model_.get(), TRANSCRIBE_FEATURE_VOCABULARY);
+        const bool supported = !streaming && transcribe_model_supports(model_.get(), TRANSCRIBE_FEATURE_VOCABULARY);
         vocabulary = supported ? XVR_VOCAB_APPLIED : XVR_VOCAB_UNSUPPORTED;
         if (supported) {
             params.vocabulary = pointers.data();
@@ -285,7 +324,6 @@ Json Engine::transcribe(const Json& request, Control& control) {
         }
     }
 
-    const bool streaming = request.value("early", false);
     if (streaming && transcribe_stream_begin(session.get(), &params, nullptr) != TRANSCRIBE_OK)
         return error(XVR_ENGINE_ERROR);
     size_t fed = 0;
@@ -320,7 +358,8 @@ Json Engine::transcribe(const Json& request, Control& control) {
     if (text.size() > max_result_size) return error(XVR_OUTPUT_TRUNCATED);
     if (!valid_utf8(text)) return error(XVR_ENGINE_ERROR);
     const auto* language = transcribe_detected_language(session.get());
-    return {{"status", XVR_OK}, {"text", std::move(text)}, {"language", language ? language : ""},
+    return {{"status", XVR_OK}, {"text", std::move(text)},
+            {"language", language && *language ? language : params.language ? params.language : ""},
             {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
             {"compute_ms", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - decode_start).count()}};
 }

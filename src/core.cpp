@@ -62,7 +62,7 @@ Broker::Broker(Send send, Deliver deliver) : send_(std::move(send)), deliver_(st
 void Broker::status(XvrRequest& out) const {
     out.model_state = model_state_;
     out.service_status = ready_ && !draining_ ? XVR_OK : XVR_ENGINE_RESTARTING;
-    out.supports_vocabulary = settings_.profile.supports_vocabulary();
+    out.supports_vocabulary = settings_.profile.supports_vocabulary(settings_.early);
     std::memset(out.model_id, 0, sizeof(out.model_id));
     std::memset(out.quantization, 0, sizeof(out.quantization));
     settings_.profile.id.copy(out.model_id, sizeof(out.model_id) - 1);
@@ -158,6 +158,7 @@ uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint6
         {"type", "begin"}, {"session", id}, {"generation", generation_},
         {"wav", std::move(wav)}, {"microphone", settings_.microphone},
         {"early", settings_.early && settings_.profile.streaming()},
+        {"language", settings_.profile.nemotron() ? settings_.language : ""},
         {"terms", client == local_client ? std::vector<std::string>{} : subscribers_.at(client)}
     };
     if (!send_(request)) return XVR_ENGINE_RESTARTING;
@@ -230,7 +231,11 @@ void Broker::accept(const Json& event, Clock::time_point now) {
     const auto type = event.value("type", "");
     if (type == "state" && event.value("generation", uint64_t(0)) == generation_) {
         model_state_ = event.at("state").get<uint32_t>();
-        if (model_state_ == XVR_MODEL_READY) previous_.reset();
+        if (model_state_ == XVR_MODEL_READY) {
+            actual_compute_ = event.value("compute", "");
+            cpu_fallback_ = event.value("cpu_fallback", false);
+            previous_.reset();
+        }
         if (model_state_ == XVR_MODEL_MISSING && previous_ && !active_) {
             settings_.profile = std::move(*previous_);
             previous_.reset();
@@ -274,6 +279,8 @@ void Broker::tick(Clock::time_point now) {
 
 void Broker::configure(Clock::time_point now) {
     ++generation_;
+    actual_compute_.clear();
+    cpu_fallback_ = false;
     last_use_ = now;
     const bool load = settings_.profile.available() && settings_.load == LoadPolicy::on_activate;
     model_state_ = !settings_.profile.available() ? XVR_MODEL_MISSING :
@@ -281,7 +288,7 @@ void Broker::configure(Clock::time_point now) {
     if (ready_) {
         const auto& profile = settings_.profile;
         send_({{"type", "configure"}, {"generation", generation_}, {"path", profile.path},
-               {"sha256", profile.sha256}, {"preload", load}});
+               {"sha256", profile.sha256}, {"preload", load}, {"compute", settings_.compute}});
     }
 }
 
@@ -305,6 +312,8 @@ void Broker::engine_online(Clock::time_point now) {
 
 void Broker::engine_lost(Clock::time_point now) {
     ready_ = false;
+    actual_compute_.clear();
+    cpu_fallback_ = false;
     draining_ = false;
     model_state_ = settings_.profile.available() ? XVR_MODEL_UNLOADED : XVR_MODEL_MISSING;
     finish(XVR_ENGINE_LOST, XVR_STAGE_NONE, {}, now);

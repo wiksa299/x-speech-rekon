@@ -93,6 +93,7 @@ void pump(int id) {
 } // namespace
 
 XPLMPluginID XPLMGetMyID() { return current; }
+void XPLMGetSystemPath(char* path) { std::strcpy(path, fs::path(prefs).parent_path().c_str()); }
 int XPLMIsPluginEnabled(XPLMPluginID id) { return id > 0 && id < 3 && plugins[id].enabled; }
 XPLMPluginID XPLMFindPluginBySignature(const char* signature) {
     for (int i = 1; i < 3; ++i) if (plugins[i].signature == signature) return i;
@@ -184,6 +185,7 @@ int main(int argc, char** argv) {
         fs::create_directories(root / "bin");
         fs::create_symlink(fs::absolute(argv[3]), root / "bin/xvr-engine");
         fs::copy_file(argv[4], root / "catalog.json");
+        fs::copy_file(fs::path(argv[4]).parent_path() / "NotoSans-Regular.ttf", root / "NotoSans-Regular.ttf");
         prefs = (root / "X-Plane.prf").u8string();
 
         load(1, argv[1], root / "64/lin.xpl");
@@ -195,7 +197,13 @@ int main(int argc, char** argv) {
             pump(2);
         }
         draw(1);
+        language = xplm_Language_English;
+        draw(1);
         language = xplm_Language_Spanish;
+        auto& provider_window = plugins[1].window;
+        provider_window.right = provider_window.left + 560;
+        provider_window.bottom = provider_window.top - 460;
+        draw(1);
         draw(2);
         {
             AsPlugin as(2);

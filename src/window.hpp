@@ -3,6 +3,7 @@
 #include <XPLMDisplay.h>
 #include <imgui.h>
 
+#include <filesystem>
 #include <functional>
 
 namespace xvr {
@@ -11,7 +12,8 @@ const char* localized(const char* english, const char* french, const char* spani
 
 class Window {
 public:
-    explicit Window(std::function<void()> draw);
+    explicit Window(std::function<void()> draw, int width = 690, int height = 680,
+                    const std::filesystem::path& fallback_font = {});
     ~Window();
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;

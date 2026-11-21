@@ -21,7 +21,7 @@ public:
 
     void start() {
         if (!process_.start()) throw std::runtime_error("could not start xvr-engine");
-        message("hello", 5s);
+        devices_ = message("hello", 5s).value("devices", Json::array());
     }
 
     Json message(std::string_view type, Clock::duration timeout) {
@@ -54,7 +54,16 @@ public:
     }
 
     void transcribe_models(const fs::path& folder, const Json& catalog, const fs::path& wav,
-                           const std::string& selection, bool microphone) {
+                           const std::string& selection, bool microphone, std::string compute, const std::string& language) {
+        if (compute == "vulkan") {
+            if (devices_.empty()) throw std::runtime_error("no Vulkan device available");
+            compute = devices_.front().at("id");
+        }
+        const auto device = std::find_if(devices_.begin(), devices_.end(), [&](const Json& item) {
+            return item.at("id") == compute;
+        });
+        const std::string expected_compute = device == devices_.end() ? "CPU" : device->at("label").get<std::string>();
+        const bool expected_fallback = compute != "cpu" && device == devices_.end();
         send({{"type", "scan"}, {"path", folder.u8string()}, {"catalog", catalog}});
         const auto found = message("scan", 10s).at("items");
         for (const auto& entry : catalog) {
@@ -70,6 +79,8 @@ public:
             Settings settings;
             settings.profile = {model.at("id"), model.at("quant"), model.at("revision"),
                                 model.at("path"), model.at("sha256")};
+            settings.compute = compute;
+            settings.language = language;
             broker_.set_settings(settings, Clock::now());
 
             uint64_t session = 0;
@@ -78,7 +89,18 @@ public:
             result(session, XVR_VOCAB_NONE, name + " offline");
 
             settings.early = true;
+            settings.load = LoadPolicy::on_activate;
             broker_.set_settings(settings, Clock::now());
+            const auto load_deadline = Clock::now() + 2s;
+            while (broker_.model_state() == XVR_MODEL_LOADING && Clock::now() < load_deadline) {
+                poll();
+                std::this_thread::sleep_for(5ms);
+            }
+            if (broker_.model_state() != XVR_MODEL_READY)
+                throw std::runtime_error("loaded model did not report ready after reconfiguration: " + name);
+            if (broker_.actual_compute() != expected_compute || broker_.cpu_fallback() != expected_fallback)
+                throw std::runtime_error("unexpected compute device for " + name + ": " + broker_.actual_compute());
+            std::cout << "Compute device: " << expected_compute << (expected_fallback ? " (fallback)" : "") << '\n';
             injection_ = microphone ? "" : wav.u8string();
             command(XVR_SUBSCRIBE);
             XvrString word{"landing gear", 12};
@@ -96,7 +118,7 @@ public:
                 wait_for_capture(session);
             }
             command(XVR_PTT_END, session);
-            result(session, settings.profile.supports_vocabulary() ? XVR_VOCAB_APPLIED : XVR_VOCAB_UNSUPPORTED,
+            result(session, settings.profile.supports_vocabulary(settings.early) ? XVR_VOCAB_APPLIED : XVR_VOCAB_UNSUPPORTED,
                    name + " PTT");
             if (microphone) return;
         }
@@ -184,7 +206,7 @@ private:
                 if (event.result.at("vocabulary") != vocabulary || event.result.value("text", "").empty())
                     throw std::runtime_error("unexpected result for " + name);
                 std::cout << name << " [" << event.result.value("compute_ms", 0)
-                          << " ms] " << event.result.value("text", "") << '\n';
+                          << " ms, " << event.result.value("language", "") << "] " << event.result.value("text", "") << '\n';
                 return;
             }
             std::this_thread::sleep_for(5ms);
@@ -213,6 +235,7 @@ private:
     std::vector<Json> inbox_;
     std::vector<Delivery> deliveries_;
     std::string injection_;
+    Json devices_ = Json::array();
 };
 
 int run(const std::vector<fs::path>& args) {
@@ -245,7 +268,10 @@ int run(const std::vector<fs::path>& args) {
         const auto wav = option("--wav");
         if (!wav.empty()) {
             const auto microphone = std::find(args.begin(), args.end(), fs::path("--mic")) != args.end();
-            check.transcribe_models(models, catalog, wav, selection, microphone);
+            const auto compute = option("--compute").u8string();
+            const auto language = option("--language").u8string();
+            check.transcribe_models(models, catalog, wav, selection, microphone,
+                                    compute.empty() ? "cpu" : compute, language.empty() ? "auto" : language);
         }
         return 0;
     } catch (const std::exception& error) {

@@ -116,6 +116,7 @@ if(XSR_BUILD_PLUGINS)
             # The experimental SDK build can be staged locally for integration tests.
             install(TARGETS xsr-moonshine RUNTIME DESTINATION X-Speech-Rekon/bin COMPONENT xsr)
             install(FILES "${moonshine_lib}/onnxruntime.dll" DESTINATION X-Speech-Rekon/bin COMPONENT xsr)
+            install(FILES assets/moonshine-catalog.json DESTINATION X-Speech-Rekon COMPONENT xsr)
         endif()
         install(TARGETS xsr-provider LIBRARY DESTINATION X-Speech-Rekon/64 COMPONENT xsr
             RUNTIME DESTINATION X-Speech-Rekon/64 COMPONENT xsr)

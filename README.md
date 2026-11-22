@@ -189,7 +189,10 @@ and the Microsoft Visual C++ x64 runtime. The Apple Silicon configuration target
 engine (`-DXSR_BUILD_PLUGINS=OFF`). It still needs native validation.
 The standard Windows preview ZIP builds without this optional SDK. The workflow’s **Test Moonshine Voice**
 input runs a separate MSVC build and tests both models from its staging directory with a WAV file and simulated PTT.
-Pushes to `dev/moonshine-voice` run the same job.
+Pushes to `dev/moonshine-voice` run the same job. Download the CPU-only experimental ZIP
+`X-Speech-Rekon-Moonshine-Windows-x86-64` from **Artifacts** after the job passes. Use the normal
+[installation steps](#install-and-test-on-windows). The experimental build requires the
+[Microsoft Visual C++ x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 With the SDK enabled, **Moonshine Voice Small** and **Moonshine Voice Medium** appear in the model list.
 The English models use their official quantized ONNX Runtime assets (142.3 MB and 269.1 MB),

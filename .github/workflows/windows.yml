@@ -109,9 +109,27 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'Essai Moonshine'
           cmake --install build/moonshine --config Release --prefix $stage --component xsr
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $engine = Join-Path $stage 'X-Speech-Rekon/bin/xsr-engine.exe'
-          $check = Join-Path $stage 'tools/xsr-check.exe'
-          $wav = Join-Path $stage 'X-Speech-Rekon/test-en.wav'
+          .\cmake\package-moonshine.ps1 -Stage $stage
+          $extracted = Join-Path $env:RUNNER_TEMP 'Vérification Moonshine'
+          Expand-Archive -LiteralPath dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip -DestinationPath $extracted
+          $engine = Join-Path $extracted 'X-Speech-Rekon/bin/xsr-engine.exe'
+          $check = Join-Path $extracted 'tools/xsr-check.exe'
+          $wav = Join-Path $extracted 'X-Speech-Rekon/test-en.wav'
+          $catalog = Join-Path $extracted 'X-Speech-Rekon/moonshine-catalog.json'
           $models = Join-Path $env:RUNNER_TEMP 'Modèles Moonshine'
-          & $check --engine $engine --catalog assets/moonshine-catalog.json --models $models --fetch --wav $wav
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & $check --engine $engine --catalog $catalog --models $models --fetch
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { exit $LASTEXITCODE }
+            Start-Sleep -Seconds (5 * $attempt)
+          }
+          & $check --engine $engine --catalog $catalog --models $models --wav $wav
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Upload Moonshine experiment and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: X-Speech-Rekon-Moonshine-Windows-x86-64
+          path: |
+            dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip
+            dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip.sha256
+          if-no-files-found: error

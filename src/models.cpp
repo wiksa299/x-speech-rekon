@@ -281,10 +281,11 @@ static bool bundle_has_expected_sizes(const fs::path& path, const Json& entry) {
 
 bool matches_bundle(const fs::path& path, const Json& entry, const std::atomic<bool>& stop) {
     if (!bundle_has_expected_sizes(path, entry)) return false;
-    return std::all_of(entry.at("parts").begin(), entry.at("parts").end(), [&](const Json& part) {
+    for (const auto& part : entry.at("parts")) {
         const auto file = path / fs::u8path(part.at("file").get<std::string>());
-        return matches_digest(file, part.at("sha256").get<std::string>(), stop);
-    });
+        if (!matches_digest(file, part.at("sha256").get<std::string>(), stop)) return false;
+    }
+    return true;
 }
 
 static Json inspect_bundle(const fs::path& path, const std::atomic<bool>* stop = nullptr) {

@@ -101,11 +101,16 @@ jobs:
             $log = Join-Path $env:RUNNER_TEMP 'xsr-moonshine-cmake.log'
             & cmake @CMakeArgs 2>&1 | Tee-Object -FilePath $log
             if ($LASTEXITCODE) {
+              $failure = $LASTEXITCODE
+              $errors = Select-String -LiteralPath $log -Pattern 'error [A-Z]+[0-9]+:|fatal error|CMake Error' |
+                Select-Object -Last 6 -ExpandProperty Line
+              if (!$errors) { $errors = Get-Content -LiteralPath $log -Tail 6 }
+              foreach ($line in $errors) { Write-Output ('::error::' + $line.Replace('%', '%25')) }
               '### Moonshine build diagnostics' >> $env:GITHUB_STEP_SUMMARY
               '```text' >> $env:GITHUB_STEP_SUMMARY
               Get-Content -LiteralPath $log -Tail 60 >> $env:GITHUB_STEP_SUMMARY
               '```' >> $env:GITHUB_STEP_SUMMARY
-              throw "CMake exited with code $LASTEXITCODE"
+              throw "CMake exited with code $failure"
             }
           }
           Invoke-MoonshineCMake @('-S', '.', '-B', 'build/moonshine', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DXSR_MOONSHINE_SDK=$sdk")

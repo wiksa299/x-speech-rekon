@@ -125,6 +125,7 @@ Json inspect(const fs::path& path, const Json& catalog) {
     if (architecture == "parakeet" && variant == nemotron_id) id = nemotron_id;
     if (architecture == "moonshine_streaming" && variant.rfind("moonshine-streaming-", 0) == 0) id = variant;
     if (architecture == "whisper" && variant == "whisper-small.en") id = whisper_transcribe_id;
+    if (architecture == "qwen3_asr" && variant == XSR_MODEL_QWEN3_ASR_06B) id = XSR_MODEL_QWEN3_ASR_06B;
     const auto type_key = gguf_find_key(gguf, "general.file_type");
     const uint32_t type = type_key >= 0 && gguf_get_kv_type(gguf, type_key) == GGUF_TYPE_UINT32 ?
         gguf_get_val_u32(gguf, type_key) : UINT32_MAX;

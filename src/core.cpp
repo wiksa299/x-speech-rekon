@@ -70,6 +70,25 @@ void Broker::status(XsrRequest& out) const {
     settings_.profile.quant.copy(out.quantization, sizeof(out.quantization) - 1);
 }
 
+static uint32_t read_terms(const XsrRequest& request, std::vector<std::string>& terms) {
+    if (request.term_count > XSR_MAX_TERMS) return XSR_VOCABULARY_LIMIT;
+    if (request.term_count && !request.terms) return XSR_BAD_REQUEST;
+    std::set<std::string> seen;
+    size_t bytes = 0;
+    for (uint32_t i = 0; i < request.term_count; ++i) {
+        const auto term = request.terms[i];
+        if (term.bytes > XSR_MAX_TERM_BYTES || bytes + term.bytes > XSR_MAX_VOCABULARY_BYTES)
+            return XSR_VOCABULARY_LIMIT;
+        if (!term.data || !term.bytes || !valid_utf8({term.data, term.bytes})) return XSR_BAD_REQUEST;
+        std::string word(term.data, term.bytes);
+        if (seen.insert(word).second) {
+            bytes += term.bytes;
+            terms.push_back(std::move(word));
+        }
+    }
+    return XSR_OK;
+}
+
 void Broker::request(int sender, XsrRequest& out, Clock::time_point now) {
     if (out.struct_size < offsetof(XsrRequest, status) + sizeof(out.status)) return;
     if (out.version != XSR_ABI_VERSION || out.struct_size < sizeof(XsrRequest)) {
@@ -97,40 +116,35 @@ void Broker::request(int sender, XsrRequest& out, Clock::time_point now) {
         forget(sender, now);
         return;
     case XSR_SET_VOCABULARY: {
-        if (out.term_count > XSR_MAX_TERMS) {
-            out.status = XSR_VOCABULARY_LIMIT;
-            return;
-        }
-        if (out.term_count && !out.terms) {
+        std::vector<std::string> terms;
+        out.status = read_terms(out, terms);
+        if (out.status == XSR_OK) subscriber->second = std::move(terms);
+        return;
+    }
+    case XSR_PTT_BEGIN: {
+        out.session = 0;
+        const auto monitor_gain = out.struct_size >= sizeof(XsrPttBeginRequest) ?
+            reinterpret_cast<const XsrPttBeginRequest&>(out).monitor_gain_percent : XSR_DEFAULT_MONITOR_GAIN_PERCENT;
+        if (monitor_gain > XSR_MAX_MONITOR_GAIN_PERCENT) {
             out.status = XSR_BAD_REQUEST;
             return;
         }
-        std::set<std::string> seen;
-        std::vector<std::string> terms;
-        size_t bytes = 0;
-        for (uint32_t i = 0; i < out.term_count; ++i) {
-            const auto term = out.terms[i];
-            if (term.bytes > XSR_MAX_TERM_BYTES || bytes + term.bytes > XSR_MAX_VOCABULARY_BYTES) {
-                out.status = XSR_VOCABULARY_LIMIT;
-                return;
-            }
-            if (!term.data || !term.bytes || !valid_utf8({term.data, term.bytes})) {
+        const bool contextual = settings_.profile.qwen() && out.struct_size >= sizeof(XsrPttContextRequest);
+        PttHints hints;
+        if (contextual) {
+            const auto context = reinterpret_cast<const XsrPttContextRequest&>(out).context;
+            if (context.bytes > XSR_MAX_CONTEXT_BYTES ||
+                (context.bytes && (!context.data || !valid_utf8({context.data, context.bytes})))) {
                 out.status = XSR_BAD_REQUEST;
                 return;
             }
-            std::string word(term.data, term.bytes);
-            if (seen.insert(word).second) {
-                bytes += term.bytes;
-                terms.push_back(std::move(word));
-            }
+            out.status = read_terms(out, hints.terms);
+            if (out.status != XSR_OK) return;
+            if (context.bytes) hints.context.assign(context.data, context.bytes);
         }
-        subscriber->second = std::move(terms);
+        out.status = begin(sender, {}, now, out.session, monitor_gain, contextual ? &hints : nullptr);
         return;
     }
-    case XSR_PTT_BEGIN:
-        out.session = 0;
-        out.status = begin(sender, {}, now, out.session);
-        return;
     case XSR_PTT_END:
         out.status = release(sender, out.session, now);
         return;
@@ -146,7 +160,8 @@ void Broker::request(int sender, XsrRequest& out, Clock::time_point now) {
     }
 }
 
-uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint64_t& session) {
+uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint64_t& session,
+                       uint32_t monitor_gain_percent, const PttHints* hints) {
     if (active_) return XSR_BUSY;
     if (!settings_.profile.available() || model_state_ == XSR_MODEL_MISSING) return XSR_MODEL_UNAVAILABLE;
     if (!service_ready()) return XSR_ENGINE_RESTARTING;
@@ -155,13 +170,17 @@ uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint6
     std::string language;
     if (settings_.profile.parakeet_v2() || settings_.profile.whisper()) language = "en";
     else if (settings_.profile.nemotron()) language = settings_.language;
+    else if (settings_.profile.qwen() && settings_.language != "auto") language = settings_.language.substr(0, 2);
     Json request = {
         {"type", "begin"}, {"session", id}, {"generation", generation_},
         {"wav", std::move(wav)}, {"microphone", settings_.microphone},
+        {"sidetone", !sample && settings_.sidetone && monitor_gain_percent != 0},
+        {"monitor_gain_percent", monitor_gain_percent},
         {"early", settings_.early && settings_.profile.streaming()},
         {"language", std::move(language)},
-        {"terms", client == local_client ? std::vector<std::string>{} : subscribers_.at(client)}
+        {"terms", hints ? hints->terms : client == local_client ? std::vector<std::string>{} : subscribers_.at(client)}
     };
+    if (hints && !hints->context.empty()) request["context"] = hints->context;
     if (!send_(request)) return XSR_ENGINE_RESTARTING;
     session = id;
     const auto limit = model_state_ == XSR_MODEL_READY ? 10s : 20s;

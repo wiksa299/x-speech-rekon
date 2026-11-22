@@ -17,7 +17,11 @@ extern "C" {
 #define XSR_MAX_TERMS 256u
 #define XSR_MAX_TERM_BYTES 96u
 #define XSR_MAX_VOCABULARY_BYTES 16384u
+#define XSR_MAX_CONTEXT_BYTES 2048u
+#define XSR_MODEL_QWEN3_ASR_06B "qwen3-asr-0.6b"
 #define XSR_MAX_TEXT_BYTES 8192u
+#define XSR_DEFAULT_MONITOR_GAIN_PERCENT 10u
+#define XSR_MAX_MONITOR_GAIN_PERCENT 100u
 
 enum XsrOperation {
     XSR_SUBSCRIBE = 1, XSR_UNSUBSCRIBE, XSR_GET_STATUS, XSR_SET_VOCABULARY,
@@ -61,6 +65,25 @@ typedef struct XsrRequest {
     char model_id[64];
     char quantization[16];
 } XsrRequest;
+
+/* Optional PTT_BEGIN payload. Pass &request with request.struct_size set to
+ * sizeof(XsrPttBeginRequest). A v1 provider without this extension ignores
+ * the gain field. The provider's monitoring preference must be enabled.
+ * The value affects playback only, for this session. Zero mutes monitoring. */
+typedef struct XsrPttBeginRequest {
+    XsrRequest request;
+    uint32_t monitor_gain_percent;
+} XsrPttBeginRequest;
+
+/* Optional PTT_BEGIN payload for Qwen3-ASR. Set begin.request.struct_size to
+ * sizeof(XsrPttContextRequest). The request terms replace the subscriber's
+ * vocabulary for this session, including when the list is empty. Context
+ * is optional UTF-8 text. Pointers need only live until the call returns.
+ * Other profiles and older providers use the registered vocabulary. */
+typedef struct XsrPttContextRequest {
+    XsrPttBeginRequest begin;
+    XsrString context;
+} XsrPttContextRequest;
 
 /* Callback-scoped event. Copy the data needed after the callback returns.
  * Text is present only for a successful terminal result. */

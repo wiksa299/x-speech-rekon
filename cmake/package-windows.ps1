@@ -59,7 +59,8 @@ $engine = Join-Path $plugin 'bin/xsr-engine.exe'
 $verifier = Join-Path $check 'tools/xsr-check.exe'
 $catalog = Join-Path $plugin 'catalog.json'
 $whisperProfiles = @('whisper-small.en-whisper-cpp/Q8_0', 'whisper-small.en-transcribe/Q8_0')
-$profiles = @('moonshine-streaming-tiny/Q8_0', 'parakeet-tdt-0.6b-v2/Q8_0', 'parakeet-tdt-0.6b-v3/Q8_0', 'nemotron-3.5-asr-streaming-0.6b/Q8_0') + $whisperProfiles
+$qwenProfile = 'qwen3-asr-0.6b/Q8_0'
+$profiles = @('moonshine-streaming-tiny/Q8_0', 'parakeet-tdt-0.6b-v2/Q8_0', 'parakeet-tdt-0.6b-v3/Q8_0', 'nemotron-3.5-asr-streaming-0.6b/Q8_0', $qwenProfile) + $whisperProfiles
 if ($FullCatalog) {
     $profiles = @(Get-Content -LiteralPath $catalog -Raw | ConvertFrom-Json | ForEach-Object { "$($_.id)/$($_.quant)" })
 }
@@ -96,6 +97,9 @@ foreach ($profile in $whisperProfiles) {
     & $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav --profile $profile --compute vulkan/ci-unavailable
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }
+Write-Host 'Testing Qwen3-ASR with CPU fallback'
+& $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav --profile $qwenProfile --compute vulkan/ci-unavailable --language en-US
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 foreach ($locale in 'en','fr','es') {
     if ($FullCatalog -and $locale -eq 'en') { continue }
     Write-Host "Testing Parakeet and Nemotron with the $locale recording"

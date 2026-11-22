@@ -37,6 +37,15 @@ int main() {
             require(requests.back().at("type") == "configure", "configuration sent");
             broker.accept({{"type", "state"}, {"generation", requests.back().at("generation")}, {"state", state}}, now);
         };
+        const auto begin_with_gain = [&](int sender, uint32_t percent) {
+            XsrPttBeginRequest command{};
+            command.request.version = XSR_ABI_VERSION;
+            command.request.struct_size = sizeof(command);
+            command.request.operation = XSR_PTT_BEGIN;
+            command.monitor_gain_percent = percent;
+            broker.request(sender, command.request, now);
+            return command.request;
+        };
         require(request(1, XSR_PTT_BEGIN).status == XSR_NOT_SUBSCRIBED, "no subscription");
         require(request(1, XSR_SUBSCRIBE).status == XSR_OK, "first subscription");
         require(request(2, XSR_SUBSCRIBE).status == XSR_OK, "second subscription");
@@ -44,6 +53,7 @@ int main() {
         require(!broker.service_ready(), "service unavailable before handshake");
 
         Settings settings;
+        settings.sidetone = true;
         settings.profile = {"parakeet-tdt-0.6b-v3", "Q8_0", "revision", "/fixture"};
         broker.set_settings(settings, now);
         broker.engine_online(now);
@@ -57,8 +67,13 @@ int main() {
         require(request(2, XSR_SET_VOCABULARY, 0, &replace, 1).status == XSR_OK, "second terms");
         require(request(1, XSR_SET_VOCABULARY, 0, &invalid, 1).status == XSR_VOCABULARY_LIMIT, "term limit");
 
+        const auto sent_before_invalid_gain = requests.size();
+        require(begin_with_gain(1, 101).status == XSR_BAD_REQUEST &&
+                requests.size() == sent_before_invalid_gain, "invalid gain does not start a session");
         const auto one = request(1, XSR_PTT_BEGIN);
         require(one.status == XSR_OK && one.session > 0, "begin one");
+        require(requests.back().at("sidetone") == true, "microphone monitoring forwarded to engine");
+        require(requests.back().at("monitor_gain_percent") == 10, "v1 request retains original monitoring level");
         require(requests.back().at("terms") == Json::array({"flight level"}), "snapshot");
         require(request(1, XSR_SET_VOCABULARY, 0, &replace, 1).status == XSR_OK, "replace in flight");
         require(request(2, XSR_PTT_BEGIN).status == XSR_BUSY, "busy");
@@ -70,7 +85,9 @@ int main() {
                        {"text", "FL250."}, {"vocabulary", XSR_VOCAB_APPLIED}}, now);
         require(deliveries.size() == 2 && deliveries.back().client == 1 &&
                 deliveries.back().result.at("quant") == "Q8_0", "targeted delivery");
-        const auto two = request(1, XSR_PTT_BEGIN);
+        const auto two = begin_with_gain(1, 40);
+        require(two.status == XSR_OK && requests.back().at("sidetone") == true &&
+                requests.back().at("monitor_gain_percent") == 40, "gain applies to this capture");
         require(requests.back().at("terms") == Json::array({"ready"}), "new vocabulary");
         now += 3s;
         broker.tick(now);
@@ -89,8 +106,13 @@ int main() {
         require(deliveries.size() == 5, "one terminal per session");
         broker.engine_online(now);
         confirm_configuration();
-        const auto early = request(2, XSR_PTT_BEGIN);
+        const auto early = begin_with_gain(2, 0);
+        require(early.status == XSR_OK && requests.back().at("sidetone") == false,
+                "zero gain uses capture without monitoring");
         require(request(2, XSR_PTT_END, early.session).status == XSR_OK, "early end");
+        const auto before_late_capture = deliveries.size();
+        broker.accept({{"type", "capture"}, {"session", early.session}}, now + 100ms);
+        require(deliveries.size() == before_late_capture, "capture after release is not delivered");
         broker.accept({{"type", "result"}, {"session", early.session}, {"status", XSR_NO_AUDIO}}, now);
         require(deliveries.back().status == XSR_NO_AUDIO, "no audio");
         require(request(2, XSR_PTT_BEGIN).status == XSR_OK, "restarted");
@@ -163,6 +185,32 @@ int main() {
         reopened.engine_online(now);
         reopened.accept({{"type", "state"}, {"generation", requests.back().at("generation")}, {"state", XSR_MODEL_MISSING}}, now);
         require(reopened.settings().profile.path == settings.profile.path, "last good model restored across providers");
+
+        auto qwen = settings;
+        qwen.profile.id = XSR_MODEL_QWEN3_ASR_06B;
+        qwen.language = "en-US";
+        broker.set_settings(qwen, now);
+        confirm_configuration();
+        const XsrString registered{"autopilot", 9}, override_term{"gear", 4};
+        require(request(1, XSR_SET_VOCABULARY, 0, &registered, 1).status == XSR_OK, "register ordinary vocabulary");
+        XsrPttContextRequest hints{};
+        hints.begin.request.version = XSR_ABI_VERSION;
+        hints.begin.request.struct_size = sizeof(hints);
+        hints.begin.request.operation = XSR_PTT_BEGIN;
+        hints.begin.request.terms = &override_term;
+        hints.begin.request.term_count = 1;
+        hints.context = {nullptr, 1};
+        broker.request(1, hints.begin.request, now);
+        require(hints.begin.request.status == XSR_BAD_REQUEST && !broker.busy(), "invalid context is rejected");
+        hints.context = {"cockpit", 7};
+        broker.request(1, hints.begin.request, now);
+        require(hints.begin.request.status == XSR_OK && requests.back().at("terms") == Json::array({"gear"}) &&
+                requests.back().at("context") == "cockpit" && requests.back().at("language") == "en", "per-request Qwen hints");
+        broker.accept({{"type", "result"}, {"session", hints.begin.request.session}, {"status", XSR_NO_AUDIO}}, now);
+        auto next = request(1, XSR_PTT_BEGIN);
+        require(next.status == XSR_OK && requests.back().at("terms") == Json::array({"autopilot"}) &&
+                !requests.back().contains("context"), "Qwen hints apply only to their session");
+        broker.accept({{"type", "result"}, {"session", next.session}, {"status", XSR_NO_AUDIO}}, now);
         broker.shutdown(now);
         require(broker.subscribers().empty() && deliveries.back().kind == XSR_SERVICE_STOPPED, "shutdown");
 

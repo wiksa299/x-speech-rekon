@@ -1,6 +1,6 @@
 # X‑Speech Rekon
 
-Add local push-to-talk speech recognition to your X-Plane plugin through a native C API. X‑Speech Rekon is a shared speech recognition service for X‑Plane 12.4.4 or later. It runs Moonshine Streaming, Parakeet v2 or v3, Nemotron 3.5 Streaming, and Whisper Small.en on the user's machine. The Windows x64 preview runs on the CPU by default and offers Vulkan on compatible GPUs.
+Add local push-to-talk speech recognition to your X-Plane plugin through a native C API. X‑Speech Rekon is a shared speech recognition service for X‑Plane 12.4.4 or later. It runs Moonshine Streaming, Parakeet v2 or v3, Nemotron 3.5 Streaming, Whisper Small.en, and Qwen3-ASR 0.6B on the user's machine. The Windows x64 preview runs on the CPU by default and offers Vulkan on compatible GPUs.
 
 [Install on Windows](#install-and-test-on-windows) · [Integrate with your plugin](#integrate-with-your-x-plane-plugin) · [Build from source](#build-and-test-without-the-simulator)
 
@@ -155,11 +155,19 @@ Open **Diagnostics → Copy diagnostics** for versions, engine and model state, 
 
 **Compute and memory** changes apply automatically. Use **Restart engine** between requests to restart the speech process. The active profile, subscriptions and activity history are kept during a manual engine restart. If a newly selected model fails to load, the provider can restore the last model that loaded successfully, including after restarting X‑Plane.
 
+Enable **Microphone monitoring** under **Settings → Recognition** to hear your own microphone quietly through the system's default audio output while holding PTT. It is off by default and is saved with the other settings. Use headphones. If the monitoring device cannot start, the microphone can still be used in capture-only mode.
+
+A client can set the monitoring volume for a single PTT session by sending an `XsrPttBeginRequest` with the same ABI version and the larger structure size. Gains range from 0 to 100 percent, with 10 percent used by the base request and zero muting monitoring. The provider's monitoring preference must still be enabled. The gain affects playback only.
+
+With Qwen3-ASR selected, a client can send `XsrPttContextRequest` with `begin.request.struct_size` set to its full size. Set `begin.request.terms` and `term_count` to the vocabulary for that session and optionally set `context` to UTF-8 text, up to `XSR_MAX_CONTEXT_BYTES`. A zero term count supplies an empty list for that session. The provider copies both inputs during the call and uses the registered vocabulary for ordinary requests.
+
 Select a Vulkan adapter under **Compute device** to try GPU inference. The status line shows the device that loaded the model, including CPU fallback if the adapter disappeared or the model failed to load on it. A compatible graphics driver provides the Vulkan runtime.
 
 Nemotron 3.5 Streaming is available in Q4_K_M, Q6_K and Q8_0. It detects the language by default and can be set to English, French or Spanish. **Early decoding** starts transcription while PTT is held.
 
 **Whisper Small.en** decodes English after PTT release. Select **Whisper Small.en · whisper.cpp** or **Whisper Small.en · transcribe.cpp** in **Settings** and download the corresponding Q8_0 file. Both use the selected CPU or Vulkan adapter. The whisper.cpp profile turns the requesting plugin's vocabulary into an initial prompt and a soft grammar. The transcribe.cpp profile uses the vocabulary as context. The two profile IDs are `whisper-small.en-whisper-cpp` and `whisper-small.en-transcribe`.
+
+**Qwen3-ASR 0.6B** is downloadable in Q8_0 for CPU and Vulkan. It decodes after PTT release. Set **Recognition language** to English for the 737 Copilot comparison. Clients can provide a short glossary or send vocabulary and free-text context together.
 
 ## Build and test without the simulator
 

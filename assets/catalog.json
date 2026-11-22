@@ -152,5 +152,16 @@
     "urls": [
       "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/10f027ec80d201b544a06bb67d5db1d5737aa8a1/whisper-small.en-Q8_0.gguf"
     ]
+  },
+  {
+    "id": "qwen3-asr-0.6b",
+    "quant": "Q8_0",
+    "revision": "7e7c69a577fa2725dfedbe34b5e999336e30a19b",
+    "file": "Qwen3-ASR-0.6B-Q8_0.gguf",
+    "bytes": 850423456,
+    "sha256": "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+    "urls": [
+      "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q8_0.gguf"
+    ]
   }
 ]

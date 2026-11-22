@@ -42,6 +42,7 @@ struct CaptureState {
     Recording& target;
     const std::atomic<bool>& released;
     const std::atomic<bool>& cancelled;
+    float monitor_gain;
 
     void append(const float* samples, size_t frames) {
         if (!samples || released || cancelled) return;
@@ -56,8 +57,18 @@ struct CaptureState {
     }
 };
 
-void capture_callback(ma_device* device, void*, const void* samples, ma_uint32 count) {
-    static_cast<CaptureState*>(device->pUserData)->append(static_cast<const float*>(samples), count);
+void capture_callback(ma_device* device, void* output, const void* samples, ma_uint32 count) {
+    auto& state = *static_cast<CaptureState*>(device->pUserData);
+    const auto* input = static_cast<const float*>(samples);
+    state.append(input, count);
+    if (!output) return;
+    auto* playback = static_cast<float*>(output);
+    if (!input || state.released || state.cancelled) {
+        std::fill_n(playback, count, 0.0f);
+        return;
+    }
+    for (ma_uint32 i = 0; i < count; ++i)
+        playback[i] = std::clamp(input[i], -1.0f, 1.0f) * state.monitor_gain;
 }
 
 void notify_callback(const ma_device_notification* notification) {
@@ -114,11 +125,11 @@ bool contains_audio(const float* samples, size_t count) {
     return false;
 }
 
-void record(Recording& target, const std::string& microphone, const fs::path& injection,
+void record(Recording& target, const std::string& microphone, const fs::path& injection, float monitor_gain,
             const std::atomic<bool>& released, const std::atomic<bool>& cancelled,
             const std::function<void(float, bool)>& report) {
     struct CloseFlag { Recording& value; ~CloseFlag() { value.closed = true; } } close{target};
-    CaptureState state{target, released, cancelled};
+    CaptureState state{target, released, cancelled, monitor_gain};
     if (released || cancelled) return;
     if (!injection.empty()) {
         const auto input = read_wav(injection);
@@ -142,27 +153,31 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
         if (!chosen) { target.error = XSR_MIC_UNAVAILABLE; return; }
     }
 
-    auto config = ma_device_config_init(ma_device_type_capture);
-    config.capture.pDeviceID = chosen;
-    config.capture.format = ma_format_f32;
-    config.capture.channels = 1;
-    config.sampleRate = sample_rate;
-    config.periodSizeInMilliseconds = 10;
-    config.dataCallback = capture_callback;
-    config.notificationCallback = notify_callback;
-    config.pUserData = &state;
     ma_device device{};
-    if (ma_device_init(&context.value, &config, &device) != MA_SUCCESS) {
-        target.error = XSR_MIC_UNAVAILABLE;
-        return;
-    }
-    if (released || cancelled) {
+    const auto start_device = [&](ma_device_type type) {
+        auto config = ma_device_config_init(type);
+        config.capture.pDeviceID = chosen;
+        config.capture.format = ma_format_f32;
+        config.capture.channels = 1;
+        config.playback.format = ma_format_f32;
+        config.playback.channels = 1;
+        config.sampleRate = sample_rate;
+        config.periodSizeInMilliseconds = 10;
+        config.dataCallback = capture_callback;
+        config.notificationCallback = notify_callback;
+        config.pUserData = &state;
+        if (ma_device_init(&context.value, &config, &device) != MA_SUCCESS) return false;
+        if (!released && !cancelled && ma_device_start(&device) == MA_SUCCESS) return true;
         ma_device_uninit(&device);
-        return;
+        return false;
+    };
+    bool recording = monitor_gain > 0 && start_device(ma_device_type_duplex);
+    if (!recording && !released && !cancelled) {
+        target.disconnected = false;
+        recording = start_device(ma_device_type_capture);
     }
-    if (ma_device_start(&device) != MA_SUCCESS) {
-        target.error = XSR_MIC_UNAVAILABLE;
-        ma_device_uninit(&device);
+    if (!recording) {
+        if (!released && !cancelled) target.error = XSR_MIC_UNAVAILABLE;
         return;
     }
 

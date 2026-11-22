@@ -38,6 +38,7 @@ constexpr ModelName names[] = {
     {nemotron_id, "Nemotron 3.5 Streaming"},
     {whisper_cpp_id, "Whisper Small.en · whisper.cpp"},
     {whisper_transcribe_id, "Whisper Small.en · transcribe.cpp"},
+    {XSR_MODEL_QWEN3_ASR_06B, "Qwen3-ASR 0.6B"},
     {"moonshine-streaming-tiny", "Moonshine Tiny"},
     {"moonshine-streaming-small", "Moonshine Small"},
     {"moonshine-streaming-medium", "Moonshine Medium"},
@@ -704,6 +705,7 @@ private:
             if (draft_.language != "en-US" && draft_.language != "fr-FR" && draft_.language != "es-ES")
                 draft_.language = "auto";
             draft_.early = saved.value("early", false);
+            draft_.sidetone = saved.value("sidetone", false);
             draft_.load = saved.value("load", 0) == 1 ? LoadPolicy::on_activate : LoadPolicy::on_use;
             draft_.unload = static_cast<UnloadPolicy>(std::clamp(saved.value("unload", 2), 0, 2));
             draft_.idle_minutes = std::clamp(saved.value("idle_minutes", 5), 1, 60);
@@ -723,7 +725,7 @@ private:
         preferences_retry_at_ = Clock::now() + 5s;
         Json saved = {{"folder", folder_.u8string()}, {"path", path}, {"id", id}, {"quant", quant},
             {"microphone", settings.microphone}, {"compute", settings.compute}, {"language", settings.language},
-            {"early", settings.early}, {"load", int(settings.load)},
+            {"early", settings.early}, {"sidetone", settings.sidetone}, {"load", int(settings.load)},
             {"unload", int(settings.unload)}, {"idle_minutes", settings.idle_minutes}};
         if (last_good.available()) saved["last_good"] = {{"id", last_good.id}, {"quant", last_good.quant},
             {"revision", last_good.revision}, {"path", last_good.path}, {"sha256", last_good.sha256}};
@@ -1079,7 +1081,7 @@ bool Provider::draw_recognition_settings() {
         ImGui::EndCombo();
     }
     const auto& active = broker_.settings().profile;
-    if (active.nemotron()) {
+    if (active.nemotron() || active.qwen()) {
         const char* ids[] = {"auto", "en-US", "fr-FR", "es-ES"};
         const char* languages[] = {localized("Auto", "Automatique", "Automático"), "English", "Français", "Español"};
         int index = 0;
@@ -1091,6 +1093,12 @@ bool Provider::draw_recognition_settings() {
             changed = true;
         }
     }
+    changed |= ImGui::Checkbox(localized("Microphone monitoring", "Retour micro", "Retorno del micrófono"), &draft_.sidetone);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", localized(
+        "Play your microphone quietly on the system's default audio output during PTT. Use headphones.",
+        "Écouter le micro à faible volume sur la sortie par défaut du système pendant le PTT. Utilise un casque.",
+        "Escucha el micrófono a bajo volumen en la salida predeterminada durante el PTT. Usa auriculares."));
+
     ImGui::BeginDisabled(!active.streaming());
     changed |= ImGui::Checkbox(localized("Early decoding", "Décodage anticipé", "Decodificación anticipada"), &draft_.early);
     ImGui::EndDisabled();
@@ -1190,7 +1198,7 @@ void Provider::start_test(TestSource source, std::string wav) {
     if (source == TestSource::reference) {
         const auto& settings = broker_.settings();
         const char* file = localized("test-en.wav", "test-fr.wav", "test-es.wav");
-        if (settings.profile.nemotron()) {
+        if (settings.profile.nemotron() || settings.profile.qwen()) {
             if (settings.language == "en-US") file = "test-en.wav";
             if (settings.language == "fr-FR") file = "test-fr.wav";
             if (settings.language == "es-ES") file = "test-es.wav";

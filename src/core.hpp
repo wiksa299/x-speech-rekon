@@ -67,9 +67,10 @@ struct Profile {
     bool moonshine_voice() const { return id == "moonshine-voice-small" || id == "moonshine-voice-medium"; }
     bool whisper_cpp() const { return id == whisper_cpp_id; }
     bool whisper() const { return whisper_cpp() || id == whisper_transcribe_id; }
+    bool qwen() const { return id == XSR_MODEL_QWEN3_ASR_06B; }
     bool english_only() const { return parakeet_v2() || whisper() || moonshine_voice() || (streaming() && !nemotron()); }
     bool supports_vocabulary(bool early = false) const {
-        return whisper() || moonshine_voice() || parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
+        return qwen() || whisper() || moonshine_voice() || parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
     }
     bool streaming() const { return nemotron() || id.rfind("moonshine-streaming-", 0) == 0; }
     bool available() const { return !path.empty(); }
@@ -87,6 +88,7 @@ struct Settings {
     UnloadPolicy unload = UnloadPolicy::after_idle;
     int idle_minutes = 5;
     bool early = false;
+    bool sidetone = false;
 };
 
 struct Delivery {
@@ -138,7 +140,12 @@ private:
         bool released = false;
     };
 
-    uint32_t begin(int client, std::string wav, Clock::time_point now, uint64_t& session);
+    struct PttHints {
+        std::vector<std::string> terms;
+        std::string context;
+    };
+    uint32_t begin(int client, std::string wav, Clock::time_point now, uint64_t& session,
+                   uint32_t monitor_gain_percent = XSR_DEFAULT_MONITOR_GAIN_PERCENT, const PttHints* hints = nullptr);
     uint32_t release(int client, uint64_t session, Clock::time_point now);
     void finish(uint32_t status, uint32_t stage, Json result, Clock::time_point now);
     void configure(Clock::time_point now);

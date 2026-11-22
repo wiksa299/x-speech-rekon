@@ -20,7 +20,7 @@ struct Recording {
     std::atomic<bool> disconnected{false};
 };
 
-void record(Recording& target, const std::string& microphone, const fs::path& injection,
+void record(Recording& target, const std::string& microphone, const fs::path& injection, float monitor_gain,
             const std::atomic<bool>& released, const std::atomic<bool>& cancelled,
             const std::function<void(float, bool)>& report);
 

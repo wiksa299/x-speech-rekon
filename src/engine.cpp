@@ -320,8 +320,12 @@ private:
     void start_capture(const Json& request, Control& control) {
         const auto microphone = request.value("microphone", "");
         const auto injection = fs::u8path(request.value("injection", ""));
-        control.capture = std::thread([this, &control, microphone, injection] {
-            record(control.recording, microphone, injection, control.released, control.cancelled,
+        const auto gain_percent = request.value("sidetone", false) ?
+            std::min(request.value("monitor_gain_percent", XSR_DEFAULT_MONITOR_GAIN_PERCENT),
+                     XSR_MAX_MONITOR_GAIN_PERCENT) : 0u;
+        const auto monitor_gain = static_cast<float>(gain_percent) / 100.0f;
+        control.capture = std::thread([this, &control, microphone, injection, monitor_gain] {
+            record(control.recording, microphone, injection, monitor_gain, control.released, control.cancelled,
                 [&](float level, bool started) {
                     publish({{"type", started ? "capture" : "level"}, {"session", control.id}, {"level", level}});
                 });
@@ -462,6 +466,9 @@ Json Engine::transcribe(const Json& request, Control& control) {
     const bool streaming = request.value("early", false);
     const auto language_hint = request.value("language", "");
     if (!language_hint.empty() && language_hint != "auto") params.language = language_hint.c_str();
+    const auto context = request.value("context", "");
+    if (!streaming && !context.empty() && transcribe_model_supports(model_.get(), TRANSCRIBE_FEATURE_CONTEXT_PROMPT))
+        params.prompt = context.c_str();
     if (!pointers.empty()) {
         const bool supported = !streaming && transcribe_model_supports(model_.get(), TRANSCRIBE_FEATURE_VOCABULARY);
         vocabulary = supported ? XSR_VOCAB_APPLIED : XSR_VOCAB_UNSUPPORTED;

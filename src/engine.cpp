@@ -13,7 +13,6 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
-#include <utility>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -147,14 +146,14 @@ private:
 
     bool loaded() const {
 #ifdef XSR_MOONSHINE
-        if (moonshine_ >= 0) return true;
+        if (moonshine_ != nullptr) return true;
 #endif
         return model_ != nullptr;
     }
 
     void unload() {
 #ifdef XSR_MOONSHINE
-        if (moonshine_ >= 0) xsr_moonshine_free(std::exchange(moonshine_, -1));
+        moonshine_.reset();
 #endif
         model_.reset();
     }
@@ -165,8 +164,9 @@ private:
         state(XSR_MODEL_LOADING);
 #ifdef XSR_MOONSHINE
         if (const auto* bundle = moonshine_bundle(sha256_)) {
-            if (matches_bundle(fs::u8path(path_), *bundle, stopping_))
-                moonshine_ = xsr_moonshine_load(path_.c_str(), bundle->at("id") == "moonshine-voice-medium");
+            const auto path = fs::u8path(path_);
+            if (matches_bundle(path, *bundle, stopping_))
+                moonshine_.reset(xsr_moonshine_load(path.c_str(), bundle->at("id") == "moonshine-voice-medium"));
             actual_compute_ = "CPU";
             state(loaded() ? XSR_MODEL_READY : XSR_MODEL_MISSING);
             return loaded();
@@ -317,7 +317,7 @@ private:
     Json transcribe(const Json& request, Control& control);
 #ifdef XSR_MOONSHINE
     Json transcribe_moonshine(const Json& request, Control& control);
-    int32_t moonshine_ = -1;
+    std::unique_ptr<MoonshineTranscriber, decltype(&xsr_moonshine_free)> moonshine_{nullptr, xsr_moonshine_free};
 #endif
 
     std::mutex mutex_, output_;
@@ -361,7 +361,7 @@ Json Engine::transcribe(const Json& request, Control& control) {
     if (!load()) return error(XSR_MODEL_UNAVAILABLE);
     if (control.cancelled) return error(XSR_CANCELLED);
 #ifdef XSR_MOONSHINE
-    if (moonshine_ >= 0) return transcribe_moonshine(request, control);
+    if (moonshine_ != nullptr) return transcribe_moonshine(request, control);
 #endif
     transcribe_session_params session_parameters{};
     transcribe_session_params_init(&session_parameters);
@@ -470,9 +470,9 @@ Json Engine::transcribe_moonshine(const Json& request, Control& control) {
     }
     const auto start = Clock::now();
     // Replace the previous client's terms even when this request has no vocabulary.
-    if (!xsr_moonshine_terms(moonshine_, csv.empty() ? nullptr : csv.c_str())) return error(XSR_ENGINE_ERROR);
+    if (!xsr_moonshine_terms(moonshine_.get(), csv.empty() ? nullptr : csv.c_str())) return error(XSR_ENGINE_ERROR);
     std::vector<char> output(max_result_size + 1);
-    const auto status = xsr_moonshine_decode(moonshine_, recording.samples.data(), count, sample_rate,
+    const auto status = xsr_moonshine_decode(moonshine_.get(), recording.samples.data(), count, sample_rate,
                                              output.data(), output.size());
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
     if (control.cancelled) return error(XSR_CANCELLED);

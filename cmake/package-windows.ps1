@@ -1,4 +1,4 @@
-param([switch]$RequireVulkan)
+param([switch]$RequireVulkan, [switch]$FullCatalog)
 
 $ErrorActionPreference = 'Stop'
 $stage = Resolve-Path dist/stage
@@ -49,17 +49,42 @@ $plugin = Join-Path $check 'X-Speech-Rekon'
 $models = Join-Path $env:RUNNER_TEMP 'xsr-models'
 $engine = Join-Path $plugin 'bin/xsr-engine.exe'
 $verifier = Join-Path $check 'tools/xsr-check.exe'
+$catalog = Join-Path $plugin 'catalog.json'
+$profiles = @('moonshine-streaming-tiny/Q8_0', 'parakeet-tdt-0.6b-v3/Q8_0', 'nemotron-3.5-asr-streaming-0.6b/Q8_0')
+if ($FullCatalog) {
+    $profiles = @(Get-Content -LiteralPath $catalog -Raw | ConvertFrom-Json | ForEach-Object { "$($_.id)/$($_.quant)" })
+}
+
+Write-Host 'Checking the packaged engine protocol'
 & $verifier --engine $engine --probe
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-& $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --fetch --verify-files --wav (Join-Path $plugin 'test-en.wav')
+foreach ($profile in $profiles) {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "Fetching $profile (attempt $attempt of 3)"
+        & $verifier --engine $engine --catalog $catalog --models $models --profile $profile --fetch
+        if ($LASTEXITCODE -eq 0) { break }
+        if ($attempt -eq 3) { throw "Could not fetch and verify $profile after $attempt attempts" }
+        Start-Sleep -Seconds (5 * $attempt)
+    }
+}
+
+$englishWav = Join-Path $plugin 'test-en.wav'
+Write-Host 'Checking model discovery and CPU fallback'
+& $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav --verify-files --profile moonshine-streaming-tiny/Q8_0 --compute vulkan/ci-unavailable
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-& $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --wav (Join-Path $plugin 'test-en.wav') --profile moonshine-streaming-tiny/Q8_0 --compute vulkan/ci-unavailable
-if ($LASTEXITCODE) { exit $LASTEXITCODE }
-foreach ($locale in 'fr','es') {
-    & $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --wav (Join-Path $plugin "test-$locale.wav") --profile parakeet-tdt-0.6b-v3/Q8_0
+if ($FullCatalog) {
+    Write-Host 'Testing transcription for all catalog profiles'
+    & $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
-    $recognitionLocale = @{ fr = 'fr-FR'; es = 'es-ES' }[$locale]
-    & $verifier --engine $engine --catalog (Join-Path $plugin 'catalog.json') --models $models --wav (Join-Path $plugin "test-$locale.wav") --profile nemotron-3.5-asr-streaming-0.6b/Q8_0 --language $recognitionLocale
+}
+foreach ($locale in 'en','fr','es') {
+    if ($FullCatalog -and $locale -eq 'en') { continue }
+    Write-Host "Testing Parakeet and Nemotron with the $locale recording"
+    $wav = Join-Path $plugin "test-$locale.wav"
+    & $verifier --engine $engine --catalog $catalog --models $models --wav $wav --profile parakeet-tdt-0.6b-v3/Q8_0
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    $recognitionLocale = @{ en = 'en-US'; fr = 'fr-FR'; es = 'es-ES' }[$locale]
+    & $verifier --engine $engine --catalog $catalog --models $models --wav $wav --profile nemotron-3.5-asr-streaming-0.6b/Q8_0 --language $recognitionLocale
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }
 

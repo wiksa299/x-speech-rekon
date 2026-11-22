@@ -1,6 +1,6 @@
 # X‑Speech Rekon
 
-Add local push-to-talk speech recognition to your X-Plane plugin through a native C API. X‑Speech Rekon is a shared speech recognition service for X‑Plane 12.4.4 or later. It runs Moonshine Streaming, Parakeet v3 or Nemotron 3.5 Streaming on the user's machine. The Windows x64 preview runs on the CPU by default and offers Vulkan on compatible GPUs.
+Add local push-to-talk speech recognition to your X-Plane plugin through a native C API. X‑Speech Rekon is a shared speech recognition service for X‑Plane 12.4.4 or later. It runs Moonshine Streaming, Parakeet v2 or v3, Nemotron 3.5 Streaming, and Whisper Small.en on the user's machine. The Windows x64 preview runs on the CPU by default and offers Vulkan on compatible GPUs.
 
 [Install on Windows](#install-and-test-on-windows) · [Integrate with your plugin](#integrate-with-your-x-plane-plugin) · [Build from source](#build-and-test-without-the-simulator)
 
@@ -135,7 +135,7 @@ static const XsrString terms[] = {
 XsrRequest vocabulary = SendVoiceRequest(XSR_SET_VOCABULARY, 0, terms, 2);
 ```
 
-Check `vocabulary.status` for errors such as `XSR_VOCABULARY_LIMIT`. The provider copies the terms during the call and uses the requesting subscriber's list at `XSR_PTT_BEGIN`. Each new list replaces the previous one. An empty list clears it. Parakeet v3, Nemotron with early decoding disabled, and the optional official Moonshine Voice engine can use these phrases as recognition hints. The `vocabulary` field in the result indicates whether the hints were passed to the model or the active mode does not support them. Your plugin validates and interprets the result.
+Check `vocabulary.status` for errors such as `XSR_VOCABULARY_LIMIT`. The provider copies the terms during the call and uses the requesting subscriber's list at `XSR_PTT_BEGIN`. Each new list replaces the previous one. An empty list clears it. Parakeet v2 (English only), multilingual Parakeet v3, Nemotron with early decoding disabled, and the optional official Moonshine Voice engine can use these phrases as recognition hints. The `vocabulary` field in the result indicates whether the hints were passed to the model or the active mode does not support them. Your plugin validates and interprets the result.
 
 ### Read-only X-Plane datarefs
 
@@ -159,6 +159,8 @@ Select a Vulkan adapter under **Compute device** to try GPU inference. The statu
 
 Nemotron 3.5 Streaming is available in Q4_K_M, Q6_K and Q8_0. It detects the language by default and can be set to English, French or Spanish. **Early decoding** starts transcription while PTT is held.
 
+**Whisper Small.en** decodes English after PTT release. Select **Whisper Small.en · whisper.cpp** or **Whisper Small.en · transcribe.cpp** in **Settings** and download the corresponding Q8_0 file. Both use the selected CPU or Vulkan adapter. The whisper.cpp profile turns the requesting plugin's vocabulary into an initial prompt and a soft grammar. The transcribe.cpp profile uses the vocabulary as context. The two profile IDs are `whisper-small.en-whisper-cpp` and `whisper-small.en-transcribe`.
+
 ## Build and test without the simulator
 
 On Linux, you need CMake 3.24 or later, Ninja, a C++17 compiler, and the development packages for libcurl and OpenSSL. On Windows, use the Visual Studio 2022 generator targeting x64. CMake fetches pinned dependencies into the build directory. Use `FETCHCONTENT_SOURCE_DIR_<NAME>` to point to a local copy of a dependency.
@@ -179,6 +181,8 @@ build/dev/xsr-check --engine build/dev/xsr-engine --catalog assets/catalog.json 
 Add `-DXSR_TEST_MODELS=/path/to/models` when configuring CMake to include that test in CTest. Use `--mic --profile parakeet-tdt-0.6b-v3/Q8_0` to test a real microphone. The other tests run without a microphone or X‑Plane. The Windows build uses native file dialogs and the system clipboard. On Linux, the WAV picker uses Zenity or KDialog and copying diagnostics uses `wl-copy` on Wayland or `xclip` on X11, when available.
 
 On an AVX2-capable Linux development machine, the tested configuration uses `-DXSR_LINUX_AVX2=ON`. Build with `-DXSR_VULKAN=ON` and provide Vulkan headers, the loader library, `glslc` and the SPIRV-Headers CMake package. Pass `--compute vulkan` to `xsr-check` to test the first detected adapter. The Windows ZIP automatically selects a compatible ggml CPU backend. The generic backend can exceed the transcription time limits on slower processors.
+
+The build places the whisper.cpp worker and its libraries in the `whisper` subdirectory beside `xsr-engine`. Keep that directory intact when relocating the engine. Each engine uses its own ggml build.
 
 ### Experimental official Moonshine Voice engine
 

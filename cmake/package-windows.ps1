@@ -9,8 +9,14 @@ $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" |
 if (!$dumpbin) { throw 'Visual Studio dumpbin is unavailable' }
 
 $engineFolder = Join-Path $stage 'X-Speech-Rekon/bin'
+$whisperFolder = Join-Path $engineFolder 'whisper'
+$whisperWorker = Join-Path $whisperFolder 'xsr-whisper.exe'
+if (!(Test-Path -LiteralPath $whisperWorker)) { throw 'Expected the Whisper engine worker' }
 if ($RequireVulkan -and !(Get-ChildItem $engineFolder -Filter '*ggml-vulkan.dll')) {
     throw 'Expected the Vulkan backend module'
+}
+if ($RequireVulkan -and !(Get-ChildItem $whisperFolder -Filter '*ggml-vulkan.dll')) {
+    throw 'Expected the Whisper Vulkan backend module'
 }
 $cpuBackends = Get-ChildItem $engineFolder -Filter '*ggml-cpu-*.dll'
 if (-not ($cpuBackends.Name -match 'x64\.dll$') -or -not ($cpuBackends.Name -match 'haswell\.dll$')) {
@@ -20,8 +26,10 @@ $files = @(
     'X-Speech-Rekon/64/win.xpl',
     'X-Speech-Rekon-Diagnostic/64/win.xpl',
     'X-Speech-Rekon/bin/xsr-engine.exe',
+    'X-Speech-Rekon/bin/whisper/xsr-whisper.exe',
     'tools/xsr-check.exe'
-) + @(Get-ChildItem $engineFolder -Filter '*.dll' | ForEach-Object { "X-Speech-Rekon/bin/$($_.Name)" })
+) + @(Get-ChildItem $engineFolder -Filter '*.dll' | ForEach-Object { "X-Speech-Rekon/bin/$($_.Name)" }) +
+    @(Get-ChildItem $whisperFolder -Filter '*.dll' | ForEach-Object { "X-Speech-Rekon/bin/whisper/$($_.Name)" })
 foreach ($file in $files) {
     $binary = Join-Path $stage $file
     $info = & $dumpbin.FullName /headers /dependents $binary
@@ -50,7 +58,8 @@ $models = Join-Path $env:RUNNER_TEMP 'xsr-models'
 $engine = Join-Path $plugin 'bin/xsr-engine.exe'
 $verifier = Join-Path $check 'tools/xsr-check.exe'
 $catalog = Join-Path $plugin 'catalog.json'
-$profiles = @('moonshine-streaming-tiny/Q8_0', 'parakeet-tdt-0.6b-v3/Q8_0', 'nemotron-3.5-asr-streaming-0.6b/Q8_0')
+$whisperProfiles = @('whisper-small.en-whisper-cpp/Q8_0', 'whisper-small.en-transcribe/Q8_0')
+$profiles = @('moonshine-streaming-tiny/Q8_0', 'parakeet-tdt-0.6b-v2/Q8_0', 'parakeet-tdt-0.6b-v3/Q8_0', 'nemotron-3.5-asr-streaming-0.6b/Q8_0') + $whisperProfiles
 if ($FullCatalog) {
     $profiles = @(Get-Content -LiteralPath $catalog -Raw | ConvertFrom-Json | ForEach-Object { "$($_.id)/$($_.quant)" })
 }
@@ -75,6 +84,16 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
 if ($FullCatalog) {
     Write-Host 'Testing transcription for all catalog profiles'
     & $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+}
+if (-not $FullCatalog) {
+    Write-Host 'Testing English-only Parakeet v2'
+    & $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav --profile parakeet-tdt-0.6b-v2/Q8_0
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+}
+foreach ($profile in $whisperProfiles) {
+    Write-Host "Testing Whisper with CPU fallback ($profile)"
+    & $verifier --engine $engine --catalog $catalog --models $models --wav $englishWav --profile $profile --compute vulkan/ci-unavailable
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
 }
 foreach ($locale in 'en','fr','es') {

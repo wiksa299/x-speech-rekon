@@ -92,11 +92,24 @@ std::string meta(const gguf_context* context, const char* name) {
 Json inspect(const fs::path& path, const Json& catalog) {
     std::ifstream input(path, std::ios::binary);
     char signature[4];
-    if (!input.read(signature, sizeof(signature)) || std::string_view(signature, 4) != "GGUF") return {};
+    if (!input.read(signature, sizeof(signature))) return {};
+    const std::string_view magic(signature, 4);
+    if (magic != "GGUF" && magic != "lmgg") return {};
     std::error_code ec;
     const auto size = fs::file_size(path, ec);
     if (ec) return {};
     Json answer = {{"path", path.u8string()}, {"bytes", size}, {"state", "incompatible"}};
+    if (magic == "lmgg") {
+        for (const auto& entry : catalog) {
+            if (entry.at("id") == whisper_cpp_id && entry.at("bytes") == size) {
+                answer["state"] = "candidate";
+                answer["id"] = entry.at("id");
+                answer["quant"] = entry.at("quant");
+                break;
+            }
+        }
+        return answer;
+    }
     std::unique_ptr<gguf_context, decltype(&gguf_free)> context(
         gguf_init_from_callback(read_metadata, &input, 0, size, {true, nullptr}), gguf_free);
     if (!context) {
@@ -107,9 +120,11 @@ Json inspect(const fs::path& path, const Json& catalog) {
     const auto architecture = meta(gguf, "general.architecture");
     const auto variant = meta(gguf, "stt.variant");
     std::string id;
+    if (architecture == "parakeet" && variant == "tdt-0.6b-v2") id = parakeet_v2_id;
     if (architecture == "parakeet" && variant == "tdt-0.6b-v3") id = "parakeet-tdt-0.6b-v3";
     if (architecture == "parakeet" && variant == nemotron_id) id = nemotron_id;
     if (architecture == "moonshine_streaming" && variant.rfind("moonshine-streaming-", 0) == 0) id = variant;
+    if (architecture == "whisper" && variant == "whisper-small.en") id = whisper_transcribe_id;
     const auto type_key = gguf_find_key(gguf, "general.file_type");
     const uint32_t type = type_key >= 0 && gguf_get_kv_type(gguf, type_key) == GGUF_TYPE_UINT32 ?
         gguf_get_val_u32(gguf, type_key) : UINT32_MAX;
@@ -330,9 +345,10 @@ Json identify_model(const fs::path& path, const Json& catalog, const std::atomic
         if (entry.at("sha256") == hash && entry.at("bytes") == model.at("bytes") &&
             entry.at("id") == model.at("id") && entry.at("quant") == model.at("quant")) {
             model["revision"] = entry.at("revision");
-            break;
+            return model;
         }
     }
+    if (model.at("id") == whisper_cpp_id) return {};
     return model;
 }
 
@@ -385,8 +401,9 @@ std::string download_model(const fs::path& folder, const Json& entry,
     const auto name = fs::u8path(entry.at("file").get<std::string>());
     const auto hash = entry.at("sha256").get<std::string>();
     const auto* bundle = moonshine_bundle(hash);
+    const bool whisper = entry.at("id") == whisper_cpp_id && name == "ggml-small.en-q8_0.bin";
     if (name.empty() || name.has_parent_path() ||
-        (bundle ? entry.at("file") != bundle->at("file") : name.extension() != ".gguf")) return "destination";
+        (bundle ? entry.at("file") != bundle->at("file") : !whisper && name.extension() != ".gguf")) return "destination";
     const auto destination = bundle ? folder / name : folder;
     std::error_code ec;
     fs::create_directories(destination, ec);

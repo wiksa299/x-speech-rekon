@@ -34,7 +34,10 @@ using xsr::localized;
 struct ModelName { const char* id; const char* label; };
 constexpr ModelName names[] = {
     {"parakeet-tdt-0.6b-v3", "Parakeet v3"},
+    {parakeet_v2_id, "Parakeet v2"},
     {nemotron_id, "Nemotron 3.5 Streaming"},
+    {whisper_cpp_id, "Whisper Small.en · whisper.cpp"},
+    {whisper_transcribe_id, "Whisper Small.en · transcribe.cpp"},
     {"moonshine-streaming-tiny", "Moonshine Tiny"},
     {"moonshine-streaming-small", "Moonshine Small"},
     {"moonshine-streaming-medium", "Moonshine Medium"},
@@ -458,6 +461,7 @@ private:
             })) throw std::runtime_error("Invalid engine devices");
             engine_version_ = message.at("version").get<std::string>();
             moonshine_version_ = message.value("moonshine_version", "");
+            whisper_version_ = message.value("whisper_version", "");
             waiting_for_hello_ = false;
             engine_status_ = XSR_OK;
             compute_devices_ = devices;
@@ -805,7 +809,7 @@ private:
     Json catalog_ = Json::array(), models_ = Json::array(), microphones_ = Json::array(), compute_devices_ = Json::array();
     Settings draft_;
     std::string selected_id_ = "parakeet-tdt-0.6b-v3", selected_quant_ = "Q8_0";
-    std::string startup_path_, persisted_profile_, download_state_, test_text_, engine_version_, moonshine_version_;
+    std::string startup_path_, persisted_profile_, download_state_, test_text_, engine_version_, moonshine_version_, whisper_version_;
     std::string persisted_good_path_, persisted_good_hash_;
     uint64_t next_ticket_ = 0, downloaded_ = 0, download_total_ = 0, test_session_ = 0;
     FileRequest scan_ticket_, identify_ticket_, browse_ticket_, download_ticket_, wav_ticket_;
@@ -922,6 +926,7 @@ void Provider::draw_models() {
     if (ImGui::BeginCombo("##model", model_label(selected_id_))) {
         for (const auto& model : names) {
             const Profile choice{model.id, {}, {}, {}, {}};
+            if (choice.whisper_cpp() && whisper_version_.empty()) continue;
             if (choice.moonshine_voice() && std::none_of(catalog_.begin(), catalog_.end(),
                     [&](const Json& entry) { return entry.at("id") == model.id; })) continue;
             if (ImGui::Selectable(model.label, selected_id_ == model.id)) {
@@ -930,6 +935,9 @@ void Provider::draw_models() {
             }
         }
         ImGui::EndCombo();
+    }
+    if (selected_id_ == parakeet_v2_id || selected_id_ == whisper_cpp_id || selected_id_ == whisper_transcribe_id) {
+        ImGui::TextDisabled("%s", localized("English only", "Anglais uniquement", "Solo inglés"));
     }
     if (selected_quant_ == "ORT") {
         ImGui::TextDisabled("%s", localized("CPU · English", "CPU · Anglais", "CPU · Inglés"));
@@ -1186,7 +1194,7 @@ void Provider::start_test(TestSource source, std::string wav) {
             if (settings.language == "en-US") file = "test-en.wav";
             if (settings.language == "fr-FR") file = "test-fr.wav";
             if (settings.language == "es-ES") file = "test-es.wav";
-        } else if (settings.profile.streaming() || settings.profile.moonshine_voice()) {
+        } else if (settings.profile.english_only()) {
             file = "test-en.wav";
         }
         wav = (root_ / file).u8string();
@@ -1371,13 +1379,16 @@ std::vector<std::pair<std::string, std::string>> Provider::diagnostic_fields() c
     else if (broker_.cpu_fallback())
         actual += localized(" (CPU fallback)", " (repli CPU)", " (respaldo CPU)");
 
-    const auto& version = profile.moonshine_voice() ? moonshine_version_ : engine_version_;
+    const auto& version = profile.moonshine_voice() ? moonshine_version_ :
+        profile.whisper_cpp() ? whisper_version_ : engine_version_;
+    const char* inference_engine = profile.moonshine_voice() ? "Moonshine Voice " :
+        profile.whisper_cpp() ? "whisper.cpp " : "transcribe.cpp ";
     return {
         {"X-Speech Rekon", XSR_VERSION},
         {"X-Plane / SDK", std::to_string(xplane_version_) + " / " + std::to_string(sdk_version_)},
         {localized("Engine", "Moteur", "Motor"), status_label(engine_status)},
         {localized("Engine version", "Version du moteur", "Versión del motor"),
-         version.empty() ? missing : std::string(profile.moonshine_voice() ? "Moonshine Voice " : "transcribe.cpp ") + version},
+         version.empty() ? missing : inference_engine + version},
         {localized("Model", "Modèle", "Modelo"),
          profile.available() ? std::string(model_label(profile.id)) + " " + profile.quant : missing},
         {localized("Model state", "État du modèle", "Estado del modelo"), model_state},

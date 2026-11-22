@@ -33,6 +33,39 @@
     ]
   },
   {
+    "id": "parakeet-tdt-0.6b-v2",
+    "quant": "Q4_K_M",
+    "revision": "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
+    "file": "parakeet-tdt-0.6b-v2-Q4_K_M.gguf",
+    "bytes": 475491840,
+    "sha256": "4853f9653f641d376e6f7de65d73c7a34a73677704a606727bf51acc83f999f3",
+    "urls": [
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q4_K_M.gguf"
+    ]
+  },
+  {
+    "id": "parakeet-tdt-0.6b-v2",
+    "quant": "Q6_K",
+    "revision": "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
+    "file": "parakeet-tdt-0.6b-v2-Q6_K.gguf",
+    "bytes": 600408576,
+    "sha256": "44c7c363438e03b613cf8ced8b7e6fd1beb2b3805008136fe5e922ab3c79eea9",
+    "urls": [
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q6_K.gguf"
+    ]
+  },
+  {
+    "id": "parakeet-tdt-0.6b-v2",
+    "quant": "Q8_0",
+    "revision": "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
+    "file": "parakeet-tdt-0.6b-v2-Q8_0.gguf",
+    "bytes": 729574912,
+    "sha256": "f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa",
+    "urls": [
+      "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q8_0.gguf"
+    ]
+  },
+  {
     "id": "parakeet-tdt-0.6b-v3",
     "quant": "Q4_K_M",
     "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
@@ -96,6 +129,28 @@
     "sha256": "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
     "urls": [
       "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
+    ]
+  },
+  {
+    "id": "whisper-small.en-whisper-cpp",
+    "quant": "Q8_0",
+    "revision": "0b364b566045a405be7225ee1e415a073e04da77",
+    "file": "ggml-small.en-q8_0.bin",
+    "bytes": 264477561,
+    "sha256": "67a179f608ea6114bd3fdb9060e762b588a3fb3bd00c4387971be4d177958067",
+    "urls": [
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/0b364b566045a405be7225ee1e415a073e04da77/ggml-small.en-q8_0.bin"
+    ]
+  },
+  {
+    "id": "whisper-small.en-transcribe",
+    "quant": "Q8_0",
+    "revision": "10f027ec80d201b544a06bb67d5db1d5737aa8a1",
+    "file": "whisper-small.en-Q8_0.gguf",
+    "bytes": 269674144,
+    "sha256": "9614e6b7fda2d26018e4f268aece8ca25a83296ea0b534169a585b740bfd71ef",
+    "urls": [
+      "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/10f027ec80d201b544a06bb67d5db1d5737aa8a1/whisper-small.en-Q8_0.gguf"
     ]
   }
 ]

@@ -152,11 +152,14 @@ uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint6
     if (!service_ready()) return XSR_ENGINE_RESTARTING;
     const auto id = ++next_session_;
     const bool sample = !wav.empty();
+    std::string language;
+    if (settings_.profile.parakeet_v2() || settings_.profile.whisper()) language = "en";
+    else if (settings_.profile.nemotron()) language = settings_.language;
     Json request = {
         {"type", "begin"}, {"session", id}, {"generation", generation_},
         {"wav", std::move(wav)}, {"microphone", settings_.microphone},
         {"early", settings_.early && settings_.profile.streaming()},
-        {"language", settings_.profile.nemotron() ? settings_.language : ""},
+        {"language", std::move(language)},
         {"terms", client == local_client ? std::vector<std::string>{} : subscribers_.at(client)}
     };
     if (!send_(request)) return XSR_ENGINE_RESTARTING;
@@ -322,7 +325,8 @@ void Broker::send_configuration(Clock::time_point now) {
     const auto& profile = settings_.profile;
     const bool preload = profile.available() && settings_.load == LoadPolicy::on_activate;
     if (send_({{"type", "configure"}, {"generation", generation_}, {"path", profile.path},
-               {"sha256", profile.sha256}, {"preload", preload}, {"compute", profile.moonshine_voice() ? "cpu" : settings_.compute}}))
+               {"sha256", profile.sha256}, {"model", profile.id}, {"preload", preload},
+               {"compute", profile.moonshine_voice() ? "cpu" : settings_.compute}}))
         configure_retry_.reset();
     else configure_retry_ = now + 100ms;
 }
@@ -332,7 +336,7 @@ void Broker::set_settings(Settings settings, Clock::time_point now) {
         pending_ = std::move(settings);
         return;
     }
-    const bool model_changed = settings_.profile.path != settings.profile.path ||
+    const bool model_changed = settings_.profile.id != settings.profile.id || settings_.profile.path != settings.profile.path ||
         settings_.profile.sha256 != settings.profile.sha256 || settings_.compute != settings.compute ||
         settings_.load != settings.load;
     if (settings_.unload != settings.unload) unload_retry_.reset();

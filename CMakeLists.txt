@@ -73,6 +73,7 @@ else()
 endif()
 
 include(cmake/Moonshine.cmake)
+include(cmake/Whisper.cmake)
 
 add_executable(xsr-check src/check.cpp)
 target_link_libraries(xsr-check PRIVATE xsr_core)

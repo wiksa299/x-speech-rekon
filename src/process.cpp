@@ -22,6 +22,15 @@ extern char** environ;
 
 namespace xsr {
 
+fs::path executable_path(const char* argv0) {
+#ifdef _WIN32
+    std::wstring path(32768, L'\0');
+    const auto length = GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()));
+    if (length && length < path.size()) return fs::path(path.substr(0, length));
+#endif
+    return fs::absolute(fs::u8path(argv0));
+}
+
 #ifdef _WIN32
 using Pipe = HANDLE;
 constexpr Pipe no_pipe = nullptr;

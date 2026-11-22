@@ -31,6 +31,7 @@ std::string status_name(uint32_t status);
 bool valid_utf8(std::string_view input);
 bool read_frame(std::istream& stream, Json& message);
 std::string wire_frame(const Json& message);
+fs::path executable_path(const char* argv0);
 
 class Process {
 public:
@@ -49,7 +50,11 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+inline constexpr char parakeet_v2_id[] = "parakeet-tdt-0.6b-v2";
 inline constexpr char nemotron_id[] = "nemotron-3.5-asr-streaming-0.6b";
+inline constexpr char whisper_cpp_id[] = "whisper-small.en-whisper-cpp";
+inline constexpr char whisper_transcribe_id[] = "whisper-small.en-transcribe";
+inline constexpr size_t whisper_chunk_samples = 8000;
 
 struct Profile {
     std::string id;
@@ -57,10 +62,14 @@ struct Profile {
     std::string revision;
     std::string path;
     std::string sha256;
+    bool parakeet_v2() const { return id == parakeet_v2_id; }
     bool nemotron() const { return id == nemotron_id; }
     bool moonshine_voice() const { return id == "moonshine-voice-small" || id == "moonshine-voice-medium"; }
+    bool whisper_cpp() const { return id == whisper_cpp_id; }
+    bool whisper() const { return whisper_cpp() || id == whisper_transcribe_id; }
+    bool english_only() const { return parakeet_v2() || whisper() || moonshine_voice() || (streaming() && !nemotron()); }
     bool supports_vocabulary(bool early = false) const {
-        return moonshine_voice() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
+        return whisper() || moonshine_voice() || parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
     }
     bool streaming() const { return nemotron() || id.rfind("moonshine-streaming-", 0) == 0; }
     bool available() const { return !path.empty(); }

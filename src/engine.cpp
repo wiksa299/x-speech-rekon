@@ -24,6 +24,8 @@ namespace {
 
 class Engine {
 public:
+    explicit Engine(const fs::path& executable)
+        : whisper_path_(executable.parent_path() / "whisper" / fs::path("xsr-whisper").concat(executable.extension().native())) {}
     ~Engine() { unload(); }
 
     int run() {
@@ -36,10 +38,12 @@ public:
                 std::string_view(info.kind) != "vulkan" || info.device_type == TRANSCRIBE_DEVICE_TYPE_CPU) continue;
             const auto id = std::string("vulkan/") + (info.device_id && *info.device_id ? info.device_id : info.name);
             const auto label = std::string("Vulkan · ") + (info.description && *info.description ? info.description : info.name);
-            vulkan_devices_.emplace(id, ComputeDevice{device, label});
+            vulkan_devices_.emplace(id, ComputeDevice{device, label, info.description ? info.description : ""});
             devices.push_back({{"id", id}, {"label", label}});
         }
         Json hello = {{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()}, {"devices", std::move(devices)}};
+        std::error_code file_error;
+        if (fs::is_regular_file(whisper_path_, file_error)) hello["whisper_version"] = XSR_WHISPER_VERSION;
 #ifdef XSR_MOONSHINE
         hello["moonshine_models"] = moonshine_catalog();
         hello["moonshine_version"] = XSR_MOONSHINE_VERSION;
@@ -148,7 +152,7 @@ private:
 #ifdef XSR_MOONSHINE
         if (moonshine_ != nullptr) return true;
 #endif
-        return model_ != nullptr;
+        return model_ != nullptr || whisper_ != nullptr;
     }
 
     void unload() {
@@ -156,6 +160,7 @@ private:
         moonshine_.reset();
 #endif
         model_.reset();
+        whisper_.reset();
     }
 
     bool load() {
@@ -175,6 +180,13 @@ private:
         if (!matches_digest(fs::u8path(path_), sha256_, stopping_)) {
             state(XSR_MODEL_MISSING);
             return false;
+        }
+        if (model_id_ == whisper_cpp_id) {
+            whisper_ = load_whisper(requested_compute_);
+            // A driver failure can terminate the worker during model loading.
+            if (!whisper_ && requested_compute_ != "cpu" && !stopping_) whisper_ = load_whisper("cpu");
+            state(loaded() ? XSR_MODEL_READY : XSR_MODEL_MISSING);
+            return loaded();
         }
         transcribe_model_load_params params{};
         transcribe_model_load_params_init(&params);
@@ -215,10 +227,12 @@ private:
                 auto path = next.request.value("path", "");
                 auto sha256 = next.request.value("sha256", "");
                 auto compute = next.request.value("compute", "cpu");
-                if (path != path_ || sha256 != sha256_ || compute != requested_compute_) unload();
+                auto model = next.request.value("model", "");
+                if (path != path_ || sha256 != sha256_ || compute != requested_compute_ || model != model_id_) unload();
                 path_ = std::move(path);
                 sha256_ = std::move(sha256);
                 requested_compute_ = std::move(compute);
+                model_id_ = std::move(model);
                 generation_ = next.request.value("generation", uint64_t(0));
                 if (path_.empty()) state(XSR_MODEL_MISSING);
                 else if (loaded()) state(XSR_MODEL_READY);
@@ -315,6 +329,9 @@ private:
     }
 
     Json transcribe(const Json& request, Control& control);
+    Json transcribe_whisper(const Json& request, Control& control);
+    std::unique_ptr<Process> load_whisper(const std::string& compute);
+    Json whisper_reply(Process& process, const std::atomic<bool>& cancelled, Clock::duration timeout) const;
 #ifdef XSR_MOONSHINE
     Json transcribe_moonshine(const Json& request, Control& control);
     std::unique_ptr<MoonshineTranscriber, decltype(&xsr_moonshine_free)> moonshine_{nullptr, xsr_moonshine_free};
@@ -331,13 +348,73 @@ private:
     struct ComputeDevice {
         transcribe_device_t handle;
         std::string label;
+        std::string description;
     };
     std::map<std::string, ComputeDevice> vulkan_devices_;
     std::unique_ptr<transcribe_model, decltype(&transcribe_model_free)> model_{nullptr, transcribe_model_free};
-    std::string path_, sha256_;
+    fs::path whisper_path_;
+    std::unique_ptr<Process> whisper_;
+    std::string path_, sha256_, model_id_;
     std::string requested_compute_ = "cpu", actual_compute_;
     uint64_t generation_ = 0;
 };
+
+Json Engine::whisper_reply(Process& process, const std::atomic<bool>& cancelled, Clock::duration timeout) const {
+    const auto deadline = Clock::now() + timeout;
+    while (!stopping_ && !cancelled && Clock::now() < deadline) {
+        auto messages = process.receive();
+        if (!messages.empty()) return std::move(messages.front());
+        if (process.failed()) break;
+        std::this_thread::sleep_for(5ms);
+    }
+    return Json::object();
+}
+
+std::unique_ptr<Process> Engine::load_whisper(const std::string& compute) {
+    const auto device = vulkan_devices_.find(compute);
+    const auto requested = device == vulkan_devices_.end() ? "cpu" : compute;
+    auto process = std::make_unique<Process>(whisper_path_);
+    if (!process->start() ||
+        !process->send({{"type", "load"}, {"path", path_}, {"compute", requested},
+                        {"description", device == vulkan_devices_.end() ? "" : device->second.description}})) return {};
+    const auto reply = whisper_reply(*process, stopping_, 8s);
+    if (reply.value("type", "") != "loaded" || !reply.value("ok", false)) return {};
+    actual_compute_ = device != vulkan_devices_.end() && reply.value("gpu", false) ? device->second.label : "CPU";
+    return process;
+}
+
+Json Engine::transcribe_whisper(const Json& request, Control& control) {
+    const auto error = [](uint32_t status) { return Json{{"status", status}}; };
+    const auto& recording = control.recording;
+    const bool capture = request.value("wav", "").empty();
+    while (capture && !recording.closed && !control.cancelled)
+        std::this_thread::sleep_for(10ms);
+    if (control.cancelled) return error(XSR_CANCELLED);
+    if (recording.error != XSR_OK) return error(recording.error);
+    const auto count = recording.count.load(std::memory_order_acquire);
+    if (!contains_audio(recording.samples.data(), count)) return error(XSR_NO_SPEECH);
+
+    bool sent = true;
+    const auto* bytes = reinterpret_cast<const unsigned char*>(recording.samples.data());
+    for (size_t offset = 0; offset < count && sent && !control.cancelled; offset += whisper_chunk_samples) {
+        const auto end = std::min(count, offset + whisper_chunk_samples) * sizeof(float);
+        std::string pcm;
+        pcm.reserve((end - offset * sizeof(float)) * 2);
+        constexpr char hex[] = "0123456789abcdef";
+        for (size_t i = offset * sizeof(float); i < end; ++i) {
+            pcm += hex[bytes[i] >> 4];
+            pcm += hex[bytes[i] & 15];
+        }
+        sent = whisper_->send({{"type", "audio"}, {"pcm", std::move(pcm)}});
+    }
+    if (sent && !control.cancelled && whisper_->send({{"type", "decode"}, {"terms", request.at("terms")}})) {
+        auto reply = whisper_reply(*whisper_, control.cancelled, 30s);
+        if (reply.value("type", "") == "result" && !control.cancelled) return reply;
+    }
+    unload();
+    state(XSR_MODEL_UNLOADED);
+    return error(control.cancelled ? XSR_CANCELLED : XSR_ENGINE_ERROR);
+}
 
 Json Engine::transcribe(const Json& request, Control& control) {
     const auto error = [](uint32_t status) { return Json{{"status", status}}; };
@@ -360,6 +437,7 @@ Json Engine::transcribe(const Json& request, Control& control) {
 
     if (!load()) return error(XSR_MODEL_UNAVAILABLE);
     if (control.cancelled) return error(XSR_CANCELLED);
+    if (whisper_) return transcribe_whisper(request, control);
 #ifdef XSR_MOONSHINE
     if (moonshine_ != nullptr) return transcribe_moonshine(request, control);
 #endif
@@ -492,7 +570,8 @@ Json Engine::transcribe_moonshine(const Json& request, Control& control) {
 } // namespace
 } // namespace xsr
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc < 1) return 1;
 #ifdef _WIN32
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
@@ -501,7 +580,7 @@ int main() {
     std::cin.tie(nullptr);
     try {
         if (transcribe_init_backends_default() != TRANSCRIBE_OK) return 1;
-        return xsr::Engine{}.run();
+        return xsr::Engine{xsr::executable_path(argv[0])}.run();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

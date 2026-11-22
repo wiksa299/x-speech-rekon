@@ -51,6 +51,4 @@ if(WIN32 AND XSR_BUILD_PLUGINS)
         FILES_MATCHING PATTERN "xsr-whisper.exe" PATTERN "*.dll")
     install(FILES "${whisper_cpp_SOURCE_DIR}/LICENSE" DESTINATION licenses
         RENAME whisper.cpp.txt COMPONENT xsr)
-    install(FILES "${whisper_cpp_SOURCE_DIR}/ggml/LICENSE" DESTINATION licenses
-        RENAME whisper-ggml.txt COMPONENT xsr)
 endif()

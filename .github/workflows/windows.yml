@@ -68,9 +68,19 @@ jobs:
         env:
           XSR_FULL_CATALOG: ${{ inputs.full_catalog }}
         run: |
-          cmake --install $env:XSR_WINDOWS_BUILD --config Release --prefix dist/stage --component xsr
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          .\cmake\package-windows.ps1 -RequireVulkan -FullCatalog:($env:XSR_FULL_CATALOG -eq 'true')
+          $installLog = Join-Path $env:RUNNER_TEMP 'xsr-install.log'
+          cmake --install $env:XSR_WINDOWS_BUILD --config Release --prefix dist/stage --component xsr 2>&1 |
+            Tee-Object -FilePath $installLog
+          if ($LASTEXITCODE) {
+            Get-Content -LiteralPath $installLog -Tail 8 | ForEach-Object { Write-Output ('::error::' + $_) }
+            exit $LASTEXITCODE
+          }
+          try {
+            .\cmake\package-windows.ps1 -RequireVulkan -FullCatalog:($env:XSR_FULL_CATALOG -eq 'true')
+          } catch {
+            Write-Output ('::error::' + ($_.Exception.Message -replace '\r?\n', '%0A'))
+            exit 1
+          }
 
       - name: Upload installable archive and checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

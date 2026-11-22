@@ -58,7 +58,10 @@ struct Profile {
     std::string path;
     std::string sha256;
     bool nemotron() const { return id == nemotron_id; }
-    bool supports_vocabulary(bool early = false) const { return id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early); }
+    bool moonshine_voice() const { return id == "moonshine-voice-small" || id == "moonshine-voice-medium"; }
+    bool supports_vocabulary(bool early = false) const {
+        return moonshine_voice() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
+    }
     bool streaming() const { return nemotron() || id.rfind("moonshine-streaming-", 0) == 0; }
     bool available() const { return !path.empty(); }
 };

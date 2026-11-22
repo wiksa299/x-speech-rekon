@@ -72,6 +72,8 @@ else()
     target_link_libraries(xsr-engine PRIVATE PkgConfig::LIBCURL OpenSSL::Crypto)
 endif()
 
+include(cmake/Moonshine.cmake)
+
 add_executable(xsr-check src/check.cpp)
 target_link_libraries(xsr-check PRIVATE xsr_core)
 
@@ -110,6 +112,11 @@ if(XSR_BUILD_PLUGINS)
     endforeach()
     target_compile_definitions(xsr-provider PRIVATE XSR_VERSION="${PROJECT_VERSION}")
     if(WIN32)
+        if(TARGET xsr-moonshine)
+            # The experimental SDK build can be staged locally for integration tests.
+            install(TARGETS xsr-moonshine RUNTIME DESTINATION X-Speech-Rekon/bin COMPONENT xsr)
+            install(FILES "${moonshine_lib}/onnxruntime.dll" DESTINATION X-Speech-Rekon/bin COMPONENT xsr)
+        endif()
         install(TARGETS xsr-provider LIBRARY DESTINATION X-Speech-Rekon/64 COMPONENT xsr
             RUNTIME DESTINATION X-Speech-Rekon/64 COMPONENT xsr)
         install(TARGETS xsr-diagnostic LIBRARY DESTINATION X-Speech-Rekon-Diagnostic/64 COMPONENT xsr

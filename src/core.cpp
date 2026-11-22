@@ -322,7 +322,7 @@ void Broker::send_configuration(Clock::time_point now) {
     const auto& profile = settings_.profile;
     const bool preload = profile.available() && settings_.load == LoadPolicy::on_activate;
     if (send_({{"type", "configure"}, {"generation", generation_}, {"path", profile.path},
-               {"sha256", profile.sha256}, {"preload", preload}, {"compute", settings_.compute}}))
+               {"sha256", profile.sha256}, {"preload", preload}, {"compute", profile.moonshine_voice() ? "cpu" : settings_.compute}}))
         configure_retry_.reset();
     else configure_retry_ = now + 100ms;
 }

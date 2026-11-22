@@ -135,7 +135,7 @@ static const XsrString terms[] = {
 XsrRequest vocabulary = SendVoiceRequest(XSR_SET_VOCABULARY, 0, terms, 2);
 ```
 
-Check `vocabulary.status` for errors such as `XSR_VOCABULARY_LIMIT`. The provider copies the terms during the call and uses the requesting subscriber's list at `XSR_PTT_BEGIN`. Each new list replaces the previous one. An empty list clears it. Parakeet v3 and Nemotron with early decoding disabled can use these phrases as recognition hints. The `vocabulary` field in the result indicates whether the hints were passed to the model or the active mode does not support them. Your plugin validates and interprets the result.
+Check `vocabulary.status` for errors such as `XSR_VOCABULARY_LIMIT`. The provider copies the terms during the call and uses the requesting subscriber's list at `XSR_PTT_BEGIN`. Each new list replaces the previous one. An empty list clears it. Parakeet v3, Nemotron with early decoding disabled, and the optional official Moonshine Voice engine can use these phrases as recognition hints. The `vocabulary` field in the result indicates whether the hints were passed to the model or the active mode does not support them. Your plugin validates and interprets the result.
 
 ### Read-only X-Plane datarefs
 
@@ -179,6 +179,38 @@ build/dev/xsr-check --engine build/dev/xsr-engine --catalog assets/catalog.json 
 Add `-DXSR_TEST_MODELS=/path/to/models` when configuring CMake to include that test in CTest. Use `--mic --profile parakeet-tdt-0.6b-v3/Q8_0` to test a real microphone. The other tests run without a microphone or X‑Plane. The Windows build uses native file dialogs and the system clipboard. On Linux, the WAV picker uses Zenity or KDialog and copying diagnostics uses `wl-copy` on Wayland or `xclip` on X11, when available.
 
 On an AVX2-capable Linux development machine, the tested configuration uses `-DXSR_LINUX_AVX2=ON`. Build with `-DXSR_VULKAN=ON` and provide Vulkan headers, the loader library, `glslc` and the SPIRV-Headers CMake package. Pass `--compute vulkan` to `xsr-check` to test the first detected adapter. The Windows ZIP automatically selects a compatible ggml CPU backend. The generic backend can exceed the transcription time limits on slower processors.
+
+### Experimental official Moonshine Voice engine
+
+Extract the [Moonshine Voice v0.1.6 native SDK](https://github.com/moonshine-ai/moonshine/releases/tag/v0.1.6)
+for your platform and set `-DXSR_MOONSHINE_SDK=/path/to/extracted/sdk` when configuring CMake.
+The directory must contain `include` and `lib`. Start with a Release build. On Windows, use MSVC x64
+and the Microsoft Visual C++ x64 runtime. The Apple Silicon configuration targets the standalone
+engine (`-DXSR_BUILD_PLUGINS=OFF`). It still needs native validation.
+The standard Windows preview ZIP builds without this optional SDK. The workflow’s **Test Moonshine Voice**
+input runs a separate MSVC build and tests both models from its staging directory with a WAV file and simulated PTT.
+Pushes to `dev/moonshine-voice` run the same job.
+
+With the SDK enabled, **Moonshine Voice Small** and **Moonshine Voice Medium** appear in the model list.
+The English models use their official quantized ONNX Runtime assets (142.3 MB and 269.1 MB),
+run on the CPU and decode after PTT release. **Download** fetches and verifies the individual files.
+You can also copy an intact model directory into **Models folder**. Rekon checks the contents before use.
+
+Use the official-model catalog with the same standalone test tool.
+
+```sh
+build/dev/xsr-check --engine build/dev/xsr-engine --catalog assets/moonshine-catalog.json \
+  --models /path/to/models --fetch --wav assets/test-en.wav
+```
+
+Set `MOONSHINE_ORT_SINGLE_THREAD=1` in the Linux test environment to reproduce the single-thread
+CPU measurements. In X-Plane, use the subscriber’s PTT to test its vocabulary. The Test tab uses the
+local test context.
+
+The result identifies the selected model as `moonshine-voice-small` or `moonshine-voice-medium`,
+with `ORT` in the format/quantization field. Official Moonshine Voice uses the requester's vocabulary
+as contextual bias. A term containing a comma makes the list unsupported for that request because the SDK
+accepts a comma-separated list. A caller without vocabulary starts with bias disabled.
 
 X‑Speech Rekon's source code is available under the MIT license. Dependencies and model weights retain their own licenses. [MIT license](LICENSE)
 

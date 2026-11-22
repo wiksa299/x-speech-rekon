@@ -1,0 +1,150 @@
+[
+  {
+    "id": "moonshine-voice-small",
+    "quant": "ORT",
+    "revision": "e318117203f245fda2ca0142db6b8c057d86671c",
+    "file": "moonshine-voice-small",
+    "bytes": 142300974,
+    "sha256": "e1b363fc0877e744d06c1a4fea2386eb30e60106bf0571f25e91172a9fdd1e6e",
+    "parts": [
+      {
+        "file": "adapter.ort",
+        "bytes": 2870368,
+        "sha256": "c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/adapter.ort"
+        ]
+      },
+      {
+        "file": "cross_kv.ort",
+        "bytes": 5356536,
+        "sha256": "e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/cross_kv.ort"
+        ]
+      },
+      {
+        "file": "decoder_kv.ort",
+        "bytes": 81878600,
+        "sha256": "1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/decoder_kv.ort"
+        ]
+      },
+      {
+        "file": "encoder.ort",
+        "bytes": 44148576,
+        "sha256": "2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/encoder.ort"
+        ]
+      },
+      {
+        "file": "frontend.model.ort",
+        "bytes": 26944,
+        "sha256": "09b1210ae30dc5f0f3e45f0ebab914c254741323114f53fbbe5ae62cca35058f",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/frontend.model.ort"
+        ]
+      },
+      {
+        "file": "frontend.weights.ort",
+        "bytes": 7769464,
+        "sha256": "7ef97521bd4bad3928f5bb6808586f4fcc6e92bd5990394112eed7d4052ec338",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/frontend.weights.ort"
+        ]
+      },
+      {
+        "file": "streaming_config.json",
+        "bytes": 512,
+        "sha256": "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/streaming_config.json"
+        ]
+      },
+      {
+        "file": "tokenizer.bin",
+        "bytes": 249974,
+        "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/small-streaming-en/quantized_26_08_21/tokenizer.bin"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "moonshine-voice-medium",
+    "quant": "ORT",
+    "revision": "e318117203f245fda2ca0142db6b8c057d86671c",
+    "file": "moonshine-voice-medium",
+    "bytes": 269141623,
+    "sha256": "facc56e5962bc8fec8d656008c989970cc275a94dfcd52b601944e68ffd2b2f3",
+    "parts": [
+      {
+        "file": "adapter.ort",
+        "bytes": 3651296,
+        "sha256": "3f2a287def57cc094367a0eec3c4f5fc36a32ec420e86764b696920991b20281",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/adapter.ort"
+        ]
+      },
+      {
+        "file": "cross_kv.ort",
+        "bytes": 11643776,
+        "sha256": "642f6e21cd305be79342207c6f9e6b681d469d55bc48c72b27b84846fb71fd1e",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/cross_kv.ort"
+        ]
+      },
+      {
+        "file": "decoder_kv.ort",
+        "bytes": 146972408,
+        "sha256": "193bb366492b74fc4ad338c6778e8d8eb916aaa11b5aa264f9057f4db7759486",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/decoder_kv.ort"
+        ]
+      },
+      {
+        "file": "encoder.ort",
+        "bytes": 94705376,
+        "sha256": "12915e76ebac7dd287c5ea63965d06103a53ba1ce242a4a34f318f3958c60c37",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/encoder.ort"
+        ]
+      },
+      {
+        "file": "frontend.model.ort",
+        "bytes": 28720,
+        "sha256": "95768855c70c8251eeecc05fedf69999da1b8ab16f605c9f457fd3354b0ad6b5",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/frontend.model.ort"
+        ]
+      },
+      {
+        "file": "frontend.weights.ort",
+        "bytes": 11889560,
+        "sha256": "5ac941f490cbe035b335b99a414cc393d62d4c6f9f2423495b286870d271d709",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/frontend.weights.ort"
+        ]
+      },
+      {
+        "file": "streaming_config.json",
+        "bytes": 513,
+        "sha256": "28e83b7a28e91472692a035e0dae3116422ae43aeb2bef5ed822c44ce89b88af",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/streaming_config.json"
+        ]
+      },
+      {
+        "file": "tokenizer.bin",
+        "bytes": 249974,
+        "sha256": "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d",
+        "urls": [
+          "https://huggingface.co/moonshine-ai/moonshine-voice-assets/resolve/e318117203f245fda2ca0142db6b8c057d86671c/model/medium-streaming-en/quantized_26_08_21/tokenizer.bin"
+        ]
+      }
+    ]
+  }
+]

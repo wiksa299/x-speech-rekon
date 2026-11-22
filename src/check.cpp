@@ -79,7 +79,8 @@ public:
             Settings settings;
             settings.profile = {model.at("id"), model.at("quant"), model.at("revision"),
                                 model.at("path"), model.at("sha256")};
-            settings.compute = compute;
+            const bool cpu_only = settings.profile.moonshine_voice();
+            settings.compute = cpu_only ? "cpu" : compute;
             settings.language = language;
             broker_.set_settings(settings, Clock::now());
             const auto confirmed = Clock::now() + 5s;
@@ -103,9 +104,11 @@ public:
             }
             if (broker_.model_state() != XSR_MODEL_READY)
                 throw std::runtime_error("loaded model did not report ready after reconfiguration: " + name);
-            if (broker_.actual_compute() != expected_compute || broker_.cpu_fallback() != expected_fallback)
+            const auto model_compute = cpu_only ? "CPU" : expected_compute;
+            const bool model_fallback = !cpu_only && expected_fallback;
+            if (broker_.actual_compute() != model_compute || broker_.cpu_fallback() != model_fallback)
                 throw std::runtime_error("unexpected compute device for " + name + ": " + broker_.actual_compute());
-            std::cout << "Compute device: " << expected_compute << (expected_fallback ? " (fallback)" : "") << '\n';
+            std::cout << "Compute device: " << model_compute << (model_fallback ? " (fallback)" : "") << '\n';
             injection_ = microphone ? "" : wav.u8string();
             command(XSR_SUBSCRIBE);
             XsrString word{"landing gear", 12};

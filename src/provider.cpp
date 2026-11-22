@@ -38,6 +38,8 @@ constexpr ModelName names[] = {
     {"moonshine-streaming-tiny", "Moonshine Tiny"},
     {"moonshine-streaming-small", "Moonshine Small"},
     {"moonshine-streaming-medium", "Moonshine Medium"},
+    {"moonshine-voice-small", "Moonshine Voice Small"},
+    {"moonshine-voice-medium", "Moonshine Voice Medium"},
 };
 
 const char* model_label(const std::string& id) {
@@ -455,9 +457,17 @@ private:
                 return string_fields(device, {"id", "label"});
             })) throw std::runtime_error("Invalid engine devices");
             engine_version_ = message.at("version").get<std::string>();
+            moonshine_version_ = message.value("moonshine_version", "");
             waiting_for_hello_ = false;
             engine_status_ = XSR_OK;
             compute_devices_ = devices;
+            auto& entries = catalog_.get_ref<Json::array_t&>();
+            entries.erase(std::remove_if(entries.begin(), entries.end(),
+                [](const Json& entry) { return entry.contains("parts"); }), entries.end());
+            const auto official = message.value("moonshine_models", Json::array());
+            if (official.is_array())
+                for (const auto& entry : official)
+                    if (entry.is_object() && entry.contains("parts")) catalog_.push_back(entry);
             broker_.engine_online(now);
             scan();
             if (window_.visible()) process_.send({{"type", "microphones"}});
@@ -795,7 +805,7 @@ private:
     Json catalog_ = Json::array(), models_ = Json::array(), microphones_ = Json::array(), compute_devices_ = Json::array();
     Settings draft_;
     std::string selected_id_ = "parakeet-tdt-0.6b-v3", selected_quant_ = "Q8_0";
-    std::string startup_path_, persisted_profile_, download_state_, test_text_, engine_version_;
+    std::string startup_path_, persisted_profile_, download_state_, test_text_, engine_version_, moonshine_version_;
     std::string persisted_good_path_, persisted_good_hash_;
     uint64_t next_ticket_ = 0, downloaded_ = 0, download_total_ = 0, test_session_ = 0;
     FileRequest scan_ticket_, identify_ticket_, browse_ticket_, download_ticket_, wav_ticket_;
@@ -832,7 +842,7 @@ void Provider::draw() {
     }
     const auto& actual = broker_.actual_compute();
     const auto compute = broker_.cpu_fallback() ? localized("CPU (fallback)", "CPU (repli)", "CPU (respaldo)") :
-        actual.empty() ? compute_label(draft_.compute) : actual;
+        actual.empty() ? (active.moonshine_voice() ? "CPU" : compute_label(draft_.compute)) : actual;
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     if (active.id.empty()) {
         ImGui::TextWrapped("%s · %s", summary, compute.c_str());
@@ -911,39 +921,46 @@ void Provider::draw_models() {
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##model", model_label(selected_id_))) {
         for (const auto& model : names) {
+            const Profile choice{model.id, {}, {}, {}, {}};
+            if (choice.moonshine_voice() && std::none_of(catalog_.begin(), catalog_.end(),
+                    [&](const Json& entry) { return entry.at("id") == model.id; })) continue;
             if (ImGui::Selectable(model.label, selected_id_ == model.id)) {
                 selected_id_ = model.id;
-                selected_quant_ = "Q8_0";
+                selected_quant_ = choice.moonshine_voice() ? "ORT" : "Q8_0";
             }
         }
         ImGui::EndCombo();
     }
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(localized("Quantization", "Quantification", "Cuantización"));
-    const bool label_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
-    ImGui::SameLine(0, 5);
-    ImGui::TextDisabled("(?)");
-    if ((label_hovered || ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) && ImGui::BeginTooltip()) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24 * ImGui::GetFontSize());
-        ImGui::TextUnformatted(localized(
-            "Quantization reduces the model’s size. Q4 is smaller, Q8 preserves more of the original precision, and Q6 is in between.",
-            "La quantification réduit la taille du modèle. Q4 est plus compact, Q8 préserve mieux la précision d’origine, et Q6 est entre les deux.",
-            "La cuantización reduce el tamaño del modelo. Q4 ocupa menos, Q8 conserva mejor la precisión original y Q6 queda entre ambos."));
-        ImGui::PopTextWrapPos();
-        ImGui::EndTooltip();
-    }
-    if (ImGui::GetContentRegionAvail().x >= 345) ImGui::SameLine();
-    for (const char* quant : {"Q4_K_M", "Q6_K", "Q8_0"}) {
-        const bool available = std::any_of(catalog_.begin(), catalog_.end(), [&](const Json& entry) {
-            return entry.at("id") == selected_id_ && entry.at("quant") == quant;
-        });
-        const bool selected = selected_quant_ == quant;
-        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        ImGui::BeginDisabled(!available);
-        if (ImGui::Button(quant)) selected_quant_ = quant;
-        ImGui::EndDisabled();
-        if (selected) ImGui::PopStyleColor();
-        if (std::strcmp(quant, "Q8_0") != 0) ImGui::SameLine();
+    if (selected_quant_ == "ORT") {
+        ImGui::TextDisabled("%s", localized("CPU · English", "CPU · Anglais", "CPU · Inglés"));
+    } else {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(localized("Quantization", "Quantification", "Cuantización"));
+        const bool label_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
+        ImGui::SameLine(0, 5);
+        ImGui::TextDisabled("(?)");
+        if ((label_hovered || ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) && ImGui::BeginTooltip()) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24 * ImGui::GetFontSize());
+            ImGui::TextUnformatted(localized(
+                "Quantization reduces the model’s size. Q4 is smaller, Q8 preserves more of the original precision, and Q6 is in between.",
+                "La quantification réduit la taille du modèle. Q4 est plus compact, Q8 préserve mieux la précision d’origine, et Q6 est entre les deux.",
+                "La cuantización reduce el tamaño del modelo. Q4 ocupa menos, Q8 conserva mejor la precisión original y Q6 queda entre ambos."));
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+        if (ImGui::GetContentRegionAvail().x >= 345) ImGui::SameLine();
+        for (const char* quant : {"Q4_K_M", "Q6_K", "Q8_0"}) {
+            const bool available = std::any_of(catalog_.begin(), catalog_.end(), [&](const Json& entry) {
+                return entry.at("id") == selected_id_ && entry.at("quant") == quant;
+            });
+            const bool selected = selected_quant_ == quant;
+            if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            ImGui::BeginDisabled(!available);
+            if (ImGui::Button(quant)) selected_quant_ = quant;
+            ImGui::EndDisabled();
+            if (selected) ImGui::PopStyleColor();
+            if (std::strcmp(quant, "Q8_0") != 0) ImGui::SameLine();
+        }
     }
     const auto* artifact = selected_entry();
     const auto candidate = candidate_path();
@@ -1094,9 +1111,10 @@ bool Provider::draw_compute_and_memory() {
     ImGui::BeginDisabled(broker_.busy());
     bool changed = false;
     ImGui::TextUnformatted(localized("Compute device", "Périphérique de calcul", "Dispositivo de cálculo"));
-    const auto compute = compute_label(draft_.compute);
+    const bool cpu_only = broker_.settings().profile.moonshine_voice();
+    const auto compute = cpu_only ? "CPU" : compute_label(draft_.compute);
     ImGui::SetNextItemWidth(-1);
-    ImGui::BeginDisabled(!broker_.ready() || (compute_devices_.empty() && draft_.compute == "cpu"));
+    ImGui::BeginDisabled(cpu_only || !broker_.ready() || (compute_devices_.empty() && draft_.compute == "cpu"));
     if (ImGui::BeginCombo("##compute", compute.c_str())) {
         if (ImGui::Selectable("CPU", draft_.compute == "cpu")) {
             draft_.compute = "cpu";
@@ -1168,7 +1186,7 @@ void Provider::start_test(TestSource source, std::string wav) {
             if (settings.language == "en-US") file = "test-en.wav";
             if (settings.language == "fr-FR") file = "test-fr.wav";
             if (settings.language == "es-ES") file = "test-es.wav";
-        } else if (settings.profile.streaming()) {
+        } else if (settings.profile.streaming() || settings.profile.moonshine_voice()) {
             file = "test-en.wav";
         }
         wav = (root_ / file).u8string();
@@ -1353,17 +1371,18 @@ std::vector<std::pair<std::string, std::string>> Provider::diagnostic_fields() c
     else if (broker_.cpu_fallback())
         actual += localized(" (CPU fallback)", " (repli CPU)", " (respaldo CPU)");
 
+    const auto& version = profile.moonshine_voice() ? moonshine_version_ : engine_version_;
     return {
         {"X-Speech Rekon", XSR_VERSION},
         {"X-Plane / SDK", std::to_string(xplane_version_) + " / " + std::to_string(sdk_version_)},
         {localized("Engine", "Moteur", "Motor"), status_label(engine_status)},
         {localized("Engine version", "Version du moteur", "Versión del motor"),
-         engine_version_.empty() ? missing : engine_version_},
+         version.empty() ? missing : std::string(profile.moonshine_voice() ? "Moonshine Voice " : "transcribe.cpp ") + version},
         {localized("Model", "Modèle", "Modelo"),
          profile.available() ? std::string(model_label(profile.id)) + " " + profile.quant : missing},
         {localized("Model state", "État du modèle", "Estado del modelo"), model_state},
         {localized("Selected microphone", "Microphone sélectionné", "Micrófono seleccionado"), microphone_label()},
-        {localized("Requested compute", "Calcul demandé", "Cálculo solicitado"), compute_label(draft_.compute)},
+        {localized("Requested compute", "Calcul demandé", "Cálculo solicitado"), profile.moonshine_voice() ? "CPU" : compute_label(draft_.compute)},
         {localized("Effective compute", "Calcul effectif", "Cálculo efectivo"), std::move(actual)},
         {localized("Settings storage", "Sauvegarde des réglages", "Guardado de ajustes"), writer_.failed() ?
             localized("Write failed, retrying", "Échec, nouvelle tentative", "Error, reintentando") : "OK"},

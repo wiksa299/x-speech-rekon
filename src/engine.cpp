@@ -1,6 +1,9 @@
 #include "audio.hpp"
 #include "desktop.hpp"
 #include "models.hpp"
+#ifdef XSR_MOONSHINE
+#include "moonshine.hpp"
+#endif
 
 #include <transcribe.h>
 
@@ -10,6 +13,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -21,6 +25,8 @@ namespace {
 
 class Engine {
 public:
+    ~Engine() { unload(); }
+
     int run() {
         Json devices = Json::array();
         for (int i = 0; i < transcribe_device_count(); ++i) {
@@ -34,7 +40,12 @@ public:
             vulkan_devices_.emplace(id, ComputeDevice{device, label});
             devices.push_back({{"id", id}, {"label", label}});
         }
-        publish({{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()}, {"devices", std::move(devices)}});
+        Json hello = {{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()}, {"devices", std::move(devices)}};
+#ifdef XSR_MOONSHINE
+        hello["moonshine_models"] = moonshine_catalog();
+        hello["moonshine_version"] = XSR_MOONSHINE_VERSION;
+#endif
+        publish(hello);
         std::thread inference([&] { inference_loop(); });
         std::thread files([&] { file_loop(); });
         std::thread downloads([&] { download_loop(); });
@@ -134,10 +145,33 @@ private:
         publish(message);
     }
 
+    bool loaded() const {
+#ifdef XSR_MOONSHINE
+        if (moonshine_ >= 0) return true;
+#endif
+        return model_ != nullptr;
+    }
+
+    void unload() {
+#ifdef XSR_MOONSHINE
+        if (moonshine_ >= 0) xsr_moonshine_free(std::exchange(moonshine_, -1));
+#endif
+        model_.reset();
+    }
+
     bool load() {
-        if (model_) return true;
+        if (loaded()) return true;
         if (path_.empty()) return false;
         state(XSR_MODEL_LOADING);
+#ifdef XSR_MOONSHINE
+        if (const auto* bundle = moonshine_bundle(sha256_)) {
+            if (matches_bundle(fs::u8path(path_), *bundle, stopping_))
+                moonshine_ = xsr_moonshine_load(path_.c_str(), bundle->at("id") == "moonshine-voice-medium");
+            actual_compute_ = "CPU";
+            state(loaded() ? XSR_MODEL_READY : XSR_MODEL_MISSING);
+            return loaded();
+        }
+#endif
         if (!matches_digest(fs::u8path(path_), sha256_, stopping_)) {
             state(XSR_MODEL_MISSING);
             return false;
@@ -181,17 +215,17 @@ private:
                 auto path = next.request.value("path", "");
                 auto sha256 = next.request.value("sha256", "");
                 auto compute = next.request.value("compute", "cpu");
-                if (path != path_ || sha256 != sha256_ || compute != requested_compute_) model_.reset();
+                if (path != path_ || sha256 != sha256_ || compute != requested_compute_) unload();
                 path_ = std::move(path);
                 sha256_ = std::move(sha256);
                 requested_compute_ = std::move(compute);
                 generation_ = next.request.value("generation", uint64_t(0));
                 if (path_.empty()) state(XSR_MODEL_MISSING);
-                else if (model_) state(XSR_MODEL_READY);
+                else if (loaded()) state(XSR_MODEL_READY);
                 else if (next.request.value("preload", false)) load();
                 else state(XSR_MODEL_UNLOADED);
             } else if (type == "unload" && next.request.value("generation", uint64_t(0)) == generation_) {
-                model_.reset();
+                unload();
                 state(path_.empty() ? XSR_MODEL_MISSING : XSR_MODEL_UNLOADED);
             } else if (type == "microphones") {
                 publish({{"type", "microphones"}, {"items", microphone_list()}});
@@ -281,6 +315,10 @@ private:
     }
 
     Json transcribe(const Json& request, Control& control);
+#ifdef XSR_MOONSHINE
+    Json transcribe_moonshine(const Json& request, Control& control);
+    int32_t moonshine_ = -1;
+#endif
 
     std::mutex mutex_, output_;
     std::condition_variable available_;
@@ -322,6 +360,9 @@ Json Engine::transcribe(const Json& request, Control& control) {
 
     if (!load()) return error(XSR_MODEL_UNAVAILABLE);
     if (control.cancelled) return error(XSR_CANCELLED);
+#ifdef XSR_MOONSHINE
+    if (moonshine_ >= 0) return transcribe_moonshine(request, control);
+#endif
     transcribe_session_params session_parameters{};
     transcribe_session_params_init(&session_parameters);
     const auto cores = std::max(2u, std::thread::hardware_concurrency());
@@ -403,6 +444,50 @@ Json Engine::transcribe(const Json& request, Control& control) {
             {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
             {"compute_ms", std::chrono::duration_cast<std::chrono::milliseconds>(compute_time).count()}};
 }
+
+#ifdef XSR_MOONSHINE
+Json Engine::transcribe_moonshine(const Json& request, Control& control) {
+    const auto error = [](uint32_t status) { return Json{{"status", status}}; };
+    auto& recording = control.recording;
+    const bool capture = request.value("wav", "").empty();
+    while (capture && !recording.closed && !control.cancelled)
+        std::this_thread::sleep_for(10ms);
+    if (control.cancelled) return error(XSR_CANCELLED);
+    if (recording.error != XSR_OK) return error(recording.error);
+    const auto count = recording.count.load(std::memory_order_acquire);
+    if (!contains_audio(recording.samples.data(), count)) return error(XSR_NO_SPEECH);
+
+    const auto terms = request.value("terms", std::vector<std::string>{});
+    const bool encodable = std::none_of(terms.begin(), terms.end(), [](const auto& term) {
+        return term.find(',') != std::string::npos || term.find('\0') != std::string::npos;
+    });
+    std::string csv;
+    if (encodable) {
+        for (const auto& term : terms) {
+            if (!csv.empty()) csv += ',';
+            csv += term;
+        }
+    }
+    const auto start = Clock::now();
+    // Replace the previous client's terms even when this request has no vocabulary.
+    if (!xsr_moonshine_terms(moonshine_, csv.empty() ? nullptr : csv.c_str())) return error(XSR_ENGINE_ERROR);
+    std::vector<char> output(max_result_size + 1);
+    const auto status = xsr_moonshine_decode(moonshine_, recording.samples.data(), count, sample_rate,
+                                             output.data(), output.size());
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
+    if (control.cancelled) return error(XSR_CANCELLED);
+    if (status == MoonshineResult::truncated) return error(XSR_OUTPUT_TRUNCATED);
+    if (status != MoonshineResult::ok) return error(XSR_ENGINE_ERROR);
+    std::string text(output.data());
+    if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XSR_NO_SPEECH);
+    if (!valid_utf8(text)) return error(XSR_ENGINE_ERROR);
+    const auto vocabulary = terms.empty() ? XSR_VOCAB_NONE :
+        csv.empty() ? XSR_VOCAB_UNSUPPORTED : XSR_VOCAB_APPLIED;
+    return {{"status", XSR_OK}, {"text", std::move(text)}, {"language", "en"},
+            {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
+            {"compute_ms", elapsed.count()}};
+}
+#endif
 
 } // namespace
 } // namespace xsr

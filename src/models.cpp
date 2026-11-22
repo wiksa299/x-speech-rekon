@@ -1,4 +1,7 @@
 #include "models.hpp"
+#ifdef XSR_MOONSHINE
+#include "moonshine_catalog.hpp"
+#endif
 
 #include <gguf.h>
 #include <ggml.h>
@@ -250,6 +253,50 @@ bool get(const std::string& url, Transfer& transfer) {
 
 } // namespace
 
+const Json& moonshine_catalog() {
+#ifdef XSR_MOONSHINE
+    static const Json catalog = Json::parse(moonshine_catalog_json);
+#else
+    static const Json catalog = Json::array();
+#endif
+    return catalog;
+}
+
+const Json* moonshine_bundle(const std::string& hash) {
+    const auto& catalog = moonshine_catalog();
+    const auto entry = std::find_if(catalog.begin(), catalog.end(), [&](const Json& model) {
+        return model.at("sha256") == hash;
+    });
+    return entry == catalog.end() ? nullptr : &*entry;
+}
+
+static bool bundle_has_expected_sizes(const fs::path& path, const Json& entry) {
+    std::error_code ec;
+    for (const auto& part : entry.at("parts")) {
+        const auto file = path / fs::u8path(part.at("file").get<std::string>());
+        if (fs::file_size(file, ec) != part.at("bytes").get<uint64_t>() || ec) return false;
+    }
+    return true;
+}
+
+bool matches_bundle(const fs::path& path, const Json& entry, const std::atomic<bool>& stop) {
+    if (!bundle_has_expected_sizes(path, entry)) return false;
+    return std::all_of(entry.at("parts").begin(), entry.at("parts").end(), [&](const Json& part) {
+        const auto file = path / fs::u8path(part.at("file").get<std::string>());
+        return matches_digest(file, part.at("sha256").get<std::string>(), stop);
+    });
+}
+
+static Json inspect_bundle(const fs::path& path, const std::atomic<bool>* stop = nullptr) {
+    for (const auto& entry : moonshine_catalog()) {
+        if (stop ? !matches_bundle(path, entry, *stop) : !bundle_has_expected_sizes(path, entry)) continue;
+        return {{"path", path.u8string()}, {"state", "candidate"}, {"bytes", entry.at("bytes")},
+                {"id", entry.at("id")}, {"quant", entry.at("quant")},
+                {"revision", entry.at("revision")}, {"sha256", entry.at("sha256")}};
+    }
+    return {};
+}
+
 Json scan_models(const fs::path& folder, const Json& catalog, const std::atomic<bool>& stop) {
     Json found = Json::array();
     std::error_code ec;
@@ -257,8 +304,10 @@ Json scan_models(const fs::path& folder, const Json& catalog, const std::atomic<
     for (fs::directory_iterator it(folder, fs::directory_options::skip_permission_denied, ec), end;
          !ec && it != end && !stop && visited < 2048 && found.size() < 64; it.increment(ec), ++visited) {
         std::error_code item_error;
-        if (!it->is_regular_file(item_error) || it->path().extension() == ".part") continue;
-        auto model = inspect(it->path(), catalog);
+        if (it->path().extension() == ".part") continue;
+        Json model;
+        if (it->is_directory(item_error)) model = inspect_bundle(it->path());
+        else if (it->is_regular_file(item_error)) model = inspect(it->path(), catalog);
         if (model.is_object()) found.push_back(std::move(model));
     }
     std::sort(found.begin(), found.end(), [](const auto& lhs, const auto& rhs) {
@@ -268,6 +317,8 @@ Json scan_models(const fs::path& folder, const Json& catalog, const std::atomic<
 }
 
 Json identify_model(const fs::path& path, const Json& catalog, const std::atomic<bool>& stop) {
+    std::error_code ec;
+    if (fs::is_directory(path, ec)) return inspect_bundle(path, &stop);
     auto model = inspect(path, catalog);
     if (!model.is_object() || model.value("state", "") != "candidate") return {};
     const auto hash = file_digest(path, stop);
@@ -288,13 +339,10 @@ bool matches_digest(const fs::path& path, const std::string& expected, const std
     return expected.size() == 64 && file_digest(path, stop) == expected;
 }
 
-std::string download_model(const fs::path& folder, const Json& entry,
-                           const std::atomic<bool>& stop, const std::function<void(uint64_t)>& progress) {
+static std::string download_part(const fs::path& folder, const Json& entry,
+                                 const std::atomic<bool>& stop, const std::function<void(uint64_t)>& progress) {
     std::error_code ec;
-    fs::create_directories(folder, ec);
-    if (ec) return "destination";
     const auto name = fs::u8path(entry.at("file").get<std::string>());
-    if (name.empty() || name.has_parent_path() || name.extension() != ".gguf") return "destination";
     const auto final = folder / name;
     if (fs::exists(final, ec) && file_digest(final, stop) == entry.at("sha256")) return "ok";
     if (stop) return "cancelled";
@@ -329,6 +377,29 @@ std::string download_model(const fs::path& folder, const Json& entry,
     }
     fs::remove(temp, ec);
     return stop ? "cancelled" : status;
+}
+
+std::string download_model(const fs::path& folder, const Json& entry,
+                           const std::atomic<bool>& stop, const std::function<void(uint64_t)>& progress) {
+    const auto name = fs::u8path(entry.at("file").get<std::string>());
+    const auto hash = entry.at("sha256").get<std::string>();
+    const auto* bundle = moonshine_bundle(hash);
+    if (name.empty() || name.has_parent_path() ||
+        (bundle ? entry.at("file") != bundle->at("file") : name.extension() != ".gguf")) return "destination";
+    const auto destination = bundle ? folder / name : folder;
+    std::error_code ec;
+    fs::create_directories(destination, ec);
+    if (ec) return "destination";
+    if (!bundle) return download_part(destination, entry, stop, progress);
+
+    uint64_t completed = 0;
+    for (const auto& part : bundle->at("parts")) {
+        const auto status = download_part(destination, part, stop, [&](uint64_t bytes) { progress(completed + bytes); });
+        if (status != "ok") return status;
+        completed += part.at("bytes").get<uint64_t>();
+        progress(completed);
+    }
+    return "ok";
 }
 
 } // namespace xsr

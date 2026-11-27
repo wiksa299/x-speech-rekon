@@ -44,7 +44,7 @@ public:
             devices.push_back({{"id", id}, {"label", label}});
         }
         Json hello = {{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()},
-                      {"devices", std::move(devices)}, {"microphone_test", true}, {"low_latency_monitoring", true}};
+                      {"devices", std::move(devices)}};
         std::error_code file_error;
         if (fs::is_regular_file(whisper_path_, file_error)) hello["whisper_version"] = XSR_WHISPER_VERSION;
 #ifdef XSR_MOONSHINE

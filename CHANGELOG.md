@@ -10,4 +10,4 @@ First Windows x64 beta for X-Plane 12.4.4 or later.
 - Microphone setup and monitoring, audio file tests, an in-flight capture indicator, request history and copyable diagnostics.
 - English, French and Spanish interfaces for both plugins. Follow the simulator language or save a manual choice. Additional translations can be supplied as JSON files.
 
-The beta package targets Windows x64. See the [installation and upgrade instructions](README.md#install-and-test-on-windows).
+The beta package targets Windows x64. See the [installation instructions](README.md#install-and-test-on-windows).

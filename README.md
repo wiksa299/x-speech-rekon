@@ -8,10 +8,10 @@ Add local push-to-talk speech recognition to your X-Plane plugin through a nativ
 
 Download `X-Speech-Rekon-Windows-x86-64.zip` and its SHA‑256 file from **Artifacts** on the corresponding [Windows build](https://github.com/wiksa299/x-speech-rekon/actions/workflows/windows.yml). Choose a model to download after installation, or point Rekon to the models you already have.
 
-1. Close X‑Plane. When upgrading from an earlier preview, move its plugin folders out of `Resources/plugins` and keep your GGUF files. Extract `X-Speech-Rekon` into `Resources/plugins`. Extract `X-Speech-Rekon-Diagnostic` alongside it to try the reference client.
+1. Close X‑Plane and extract `X-Speech-Rekon` into `Resources/plugins`. Extract `X-Speech-Rekon-Diagnostic` alongside it to try the reference client.
 2. Start X‑Plane and open **Plugins → X-Speech Rekon → Settings**. Use **Models folder** to select where you kept your models, or select a model such as Parakeet v3 or Whisper Small.en, choose **Q8_0**, and click **Download**. Select **Use this model** when it appears as available.
 3. Open **Test**. Try **Test the built-in recording** or **Choose a WAV file…** with a recording of up to 30 seconds. Use **Hold to talk** to test your microphone. Results appear under **Transcript**.
-4. To test inter-plugin PTT with the diagnostic client, bind `xspeech_rekon/diagnostic/ptt` in X‑Plane. Open its diagnostic window, hold the binding while speaking, and release it to see the transcript and model identity. Reassign the binding after upgrading from an earlier preview.
+4. To test inter-plugin PTT with the diagnostic client, bind `xspeech_rekon/diagnostic/ptt` in X‑Plane. Open its diagnostic window, hold the binding while speaking, and release it to see the transcript and model identity.
 
 For English-only recognition, select **Parakeet v2**. Q4_K_M, Q6_K and Q8_0 are available. The built-in recording is in English even when the interface uses French or Spanish.
 
@@ -215,7 +215,7 @@ for your platform and set `-DXSR_MOONSHINE_SDK=/path/to/extracted/sdk` when conf
 The directory must contain `include` and `lib`. Start with a Release build. On Windows, use MSVC x64
 and the Microsoft Visual C++ x64 runtime. The Apple Silicon configuration targets the standalone
 engine (`-DXSR_BUILD_PLUGINS=OFF`). It still needs native validation.
-The standard Windows preview ZIP builds without this optional SDK. The workflow’s **Test Moonshine Voice**
+The standard Windows beta ZIP builds without this optional SDK. The workflow’s **Test Moonshine Voice**
 input runs a separate MSVC build and tests both models from its staging directory with a WAV file and simulated PTT.
 Pushes to `dev/moonshine-voice` run the same job. Download the CPU-only experimental ZIP
 `X-Speech-Rekon-Moonshine-Windows-x86-64` from **Artifacts** after the job passes. Use the normal

@@ -237,7 +237,7 @@ int main() {
         require(reopened.settings().profile.path == settings.profile.path, "last good model restored across providers");
 
         require(Profile{whisper_cpp_id, {}, {}, {}, {}}.supported() &&
-                !Profile{"retired-profile", {}, {}, {}, {}}.supported(), "supported profile set");
+                !Profile{"unknown-profile", {}, {}, {}, {}}.supported(), "supported profile set");
         const XsrString registered{"autopilot", 9}, override_term{"gear", 4};
         require(request(1, XSR_SET_VOCABULARY, 0, &registered, 1).status == XSR_OK, "register ordinary vocabulary");
         struct OlderBeginRequest { XsrPttBeginRequest begin; XsrString extension; } hints{};

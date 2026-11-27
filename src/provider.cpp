@@ -137,10 +137,6 @@ bool valid_catalog_entry(const Json& entry) {
         });
 }
 
-bool same_catalog_profile(const Json& first, const Json& second) {
-    return first.at("id") == second.at("id") && first.at("quant") == second.at("quant");
-}
-
 Profile decode_profile(const Json& value) {
     if (!string_fields(value, {"id", "quant", "revision", "path", "sha256"}) ||
         !valid_digest(value["sha256"].get_ref<const std::string&>())) return {};
@@ -305,20 +301,10 @@ public:
         broker_([&](const Json& command) { return process_.send(command); },
                 [&](const Delivery& delivery) { pending_events_.push_back(delivery); }),
         window_([&] { draw(); }, 620, 810, root_ / "NotoSans-Regular.ttf", xplm_WindowDecorationRoundRectangle, true) {
-        catalog_ = Json::parse(built_in_model_catalog);
-        const auto installed_catalog = json_file(root_ / "catalog.json");
-        if (installed_catalog.is_array()) {
-            for (const auto& entry : installed_catalog) {
-                if (!valid_catalog_entry(entry)) continue;
-                const auto current = std::find_if(catalog_.begin(), catalog_.end(), [&](const Json& model) {
-                    return same_catalog_profile(model, entry);
-                });
-                if (current == catalog_.end()) catalog_.push_back(entry);
-                else *current = entry;
-            }
-        }
-        catalog_error_ = !catalog_.is_array() || !std::all_of(catalog_.begin(), catalog_.end(), valid_catalog_entry);
-        if (catalog_error_) catalog_ = Json::array();
+        catalog_ = json_file(root_ / "catalog.json");
+        catalog_error_ = !catalog_.is_array() || catalog_.empty() ||
+            !std::all_of(catalog_.begin(), catalog_.end(), valid_catalog_entry);
+        if (catalog_error_) catalog_ = Json::parse(built_in_model_catalog);
         initialize_interface(false);
         load_preferences();
         XPLMHostApplicationID host{};
@@ -434,8 +420,6 @@ private:
         const bool microphone_interrupted = microphone_test_.session != 0;
         microphone_test_ = {};
         if (microphone_interrupted) microphone_test_.status = XSR_ENGINE_LOST;
-        microphone_test_supported_ = false;
-        low_latency_monitoring_supported_ = false;
         last_monitoring_ = {};
         protocol_fault_ = false;
         clear_file_requests();
@@ -530,8 +514,6 @@ private:
                 return string_fields(device, {"id", "label"});
             })) throw std::runtime_error("Invalid engine devices");
             engine_version_ = message.at("version").get<std::string>();
-            microphone_test_supported_ = message.value("microphone_test", false);
-            low_latency_monitoring_supported_ = message.value("low_latency_monitoring", false);
             moonshine_version_ = message.value("moonshine_version", "");
             whisper_version_ = message.value("whisper_version", "");
             waiting_for_hello_ = false;
@@ -815,7 +797,6 @@ private:
         folder_ = root_ / "models";
         const auto saved = json_file(preferences_);
         if (!saved.is_object()) return;
-        bool retired_profile = false;
         try {
             folder_ = fs::u8path(saved.value("folder", folder_.u8string()));
             const Profile preferred{saved.value("id", selected_id_), saved.value("quant", selected_quant_), {},
@@ -824,13 +805,8 @@ private:
                 selected_id_ = preferred.id;
                 selected_quant_ = preferred.quant;
                 startup_path_ = preferred.path;
-            } else {
-                retired_profile = true;
             }
-            const auto saved_good = saved.value("last_good", Json{});
-            const auto last_good = decode_profile(saved_good);
-            if (string_fields(saved_good, {"id"}) && !saved_good["id"].get_ref<const std::string&>().empty() &&
-                !last_good.available()) retired_profile = true;
+            const auto last_good = decode_profile(saved.value("last_good", Json{}));
             broker_.restore_last_good(last_good);
             persisted_good_path_ = last_good.path;
             persisted_good_hash_ = last_good.sha256;
@@ -854,7 +830,6 @@ private:
             draft_.idle_minutes = std::clamp(saved.value("idle_minutes", 5), 1, 60);
         } catch (const Json::exception&) {}
         broker_.set_settings(draft_, Clock::now());
-        if (retired_profile) save_preferences();
     }
 
     void save_preferences() {
@@ -982,8 +957,7 @@ private:
     bool wav_picker_failed_ = false, folder_picker_failed_ = false, scan_error_ = false, catalog_error_ = false;
     float test_level_ = 0;
     MicrophoneTest microphone_test_;
-    bool microphone_test_supported_ = false, microphone_panel_open_ = false, microphone_panel_requested_ = false;
-    bool low_latency_monitoring_supported_ = false;
+    bool microphone_panel_open_ = false, microphone_panel_requested_ = false;
     Json last_monitoring_;
     bool model_error_ = false, boot_selection_ = true, waiting_for_hello_ = false, shutting_down_ = false;
     bool model_picker_edited_ = false;
@@ -1088,14 +1062,12 @@ void Provider::draw_settings() {
             const char* modes[] = {ui_label("standard"),
                                    ui_label("low_latency")};
             int selected = draft_.low_latency_monitoring ? 1 : 0;
-            ImGui::BeginDisabled(!low_latency_monitoring_supported_);
             ImGui::TextUnformatted(tr("monitoring_mode"));
             ImGui::SetNextItemWidth(-1);
             if (ImGui::Combo("##monitoring-mode", &selected, modes, IM_ARRAYSIZE(modes))) {
                 draft_.low_latency_monitoring = selected == 1;
                 changed = true;
             }
-            ImGui::EndDisabled();
         }
         ImGui::EndDisabled();
     }
@@ -1494,9 +1466,8 @@ void Provider::draw_microphone_levels() {
     } else if (broker_.busy()) {
         status = status_label(XSR_BUSY);
         color = amber_text;
-    } else if (!microphone_test_supported_) {
-        status = broker_.ready() ? tr("update_the_rekon_engine") :
-            status_label(XSR_ENGINE_RESTARTING);
+    } else if (!broker_.service_ready()) {
+        status = status_label(XSR_ENGINE_RESTARTING);
         color = amber_text;
     }
     ImGui::TextColored(color, "%s", status);
@@ -1538,7 +1509,7 @@ void Provider::draw_microphone_levels() {
         ImGui::EndTable();
     }
     ImGui::TextWrapped("%s", guide);
-    const bool can_start = microphone_test_supported_ && broker_.service_ready() && !broker_.busy() && !take.playing;
+    const bool can_start = broker_.service_ready() && !broker_.busy() && !take.playing;
     ImGui::BeginDisabled(take.capturing ? take.ending : !can_start);
     ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
     if (ImGui::Button(take.capturing ? ui_label("finish_test") :

@@ -6,7 +6,7 @@ Add local push-to-talk speech recognition to your X-Plane plugin through a nativ
 
 ## Install and test on Windows
 
-Download `X-Speech-Rekon-Windows-x86-64.zip` and its SHA‑256 file from **Artifacts** on the corresponding [Windows build](https://github.com/wiksa299/x-speech-rekon/actions/workflows/windows.yml). Choose a model to download after installation, or point Rekon to the models you already have.
+Download `X-Speech-Rekon-Windows-x86-64.zip` and its SHA‑256 file from **Artifacts** on a successful [Windows build of the main branch](https://github.com/wiksa299/x-speech-rekon/actions/workflows/windows.yml?query=branch%3Amain). Choose a model to download after installation, or point Rekon to the models you already have.
 
 1. Close X‑Plane and extract `X-Speech-Rekon` into `Resources/plugins`. Extract `X-Speech-Rekon-Diagnostic` alongside it to try the reference client.
 2. Start X‑Plane and open **Plugins → X-Speech Rekon → Settings**. Use **Models folder** to select where you kept your models, or select a model such as Parakeet v3 or Whisper Small.en, choose **Q8_0**, and click **Download**. Select **Use this model** when it appears as available.
@@ -217,7 +217,7 @@ and the Microsoft Visual C++ x64 runtime. The Apple Silicon configuration target
 engine (`-DXSR_BUILD_PLUGINS=OFF`). It still needs native validation.
 The standard Windows beta ZIP builds without this optional SDK. The workflow’s **Test Moonshine Voice**
 input runs a separate MSVC build and tests both models from its staging directory with a WAV file and simulated PTT.
-Pushes to `dev/moonshine-voice` run the same job. Download the CPU-only experimental ZIP
+Download the CPU-only experimental ZIP
 `X-Speech-Rekon-Moonshine-Windows-x86-64` from **Artifacts** after the job passes. Use the normal
 [installation steps](#install-and-test-on-windows). The experimental build requires the
 [Microsoft Visual C++ x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).

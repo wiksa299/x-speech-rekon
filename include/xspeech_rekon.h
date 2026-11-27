@@ -65,8 +65,7 @@ typedef struct XsrRequest {
 } XsrRequest;
 
 /* Optional PTT_BEGIN payload. Pass &request with request.struct_size set to
- * sizeof(XsrPttBeginRequest). A v1 provider without this extension ignores
- * the gain field. The provider's monitoring preference must be enabled.
+ * sizeof(XsrPttBeginRequest). The provider's monitoring preference must be enabled.
  * The value overrides the provider's monitoring volume for this session only.
  * It affects playback only. Zero mutes monitoring. The base XsrRequest uses
  * the provider's configured volume. */

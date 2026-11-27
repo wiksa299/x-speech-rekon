@@ -1,4 +1,4 @@
-name: Windows x86-64 preview
+name: Windows x86-64
 
 on:
   workflow_dispatch:
@@ -12,8 +12,9 @@ on:
         type: boolean
         default: false
   push:
-    branches: ['main', '*/windows-preview', 'dev/moonshine-voice']
+    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -92,7 +93,7 @@ jobs:
           if-no-files-found: error
 
   moonshine-windows:
-    if: ${{ github.ref_name == 'dev/moonshine-voice' || (github.event_name == 'workflow_dispatch' && inputs.moonshine_voice) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.moonshine_voice }}
     runs-on: windows-2022
     timeout-minutes: 30
     steps:

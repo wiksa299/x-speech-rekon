@@ -136,6 +136,7 @@ if(XSR_BUILD_PLUGINS)
             LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/plugins/${plugin}"
             RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/plugins/${plugin}")
     endforeach()
+    target_sources(xsr-provider PRIVATE src/provider_microphone.cpp src/provider_storage.cpp src/provider_ui.cpp)
     target_compile_definitions(xsr-provider PRIVATE XSR_VERSION="${XSR_RELEASE_VERSION}")
     target_include_directories(xsr-provider PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     if(WIN32)

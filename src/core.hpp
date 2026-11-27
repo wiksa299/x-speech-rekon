@@ -23,8 +23,10 @@ using namespace std::chrono_literals;
 
 constexpr size_t max_frame = 65536;
 constexpr int local_client = -2;
+constexpr int microphone_client = -3;
 constexpr uint32_t sample_rate = 16000;
 constexpr uint32_t max_samples = 30 * sample_rate;
+constexpr uint32_t microphone_test_seconds = 10;
 constexpr uint32_t max_result_size = XSR_MAX_TEXT_BYTES;
 
 std::string status_name(uint32_t status);
@@ -67,6 +69,10 @@ struct Profile {
     bool moonshine_voice() const { return id == "moonshine-voice-small" || id == "moonshine-voice-medium"; }
     bool whisper_cpp() const { return id == whisper_cpp_id; }
     bool whisper() const { return whisper_cpp() || id == whisper_transcribe_id; }
+    bool supported() const {
+        return parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || nemotron() || whisper() || moonshine_voice() ||
+            id == "moonshine-streaming-tiny" || id == "moonshine-streaming-small" || id == "moonshine-streaming-medium";
+    }
     bool english_only() const { return parakeet_v2() || whisper() || moonshine_voice() || (streaming() && !nemotron()); }
     bool supports_vocabulary(bool early = false) const {
         return whisper() || moonshine_voice() || parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
@@ -87,6 +93,9 @@ struct Settings {
     UnloadPolicy unload = UnloadPolicy::after_idle;
     int idle_minutes = 5;
     bool early = false;
+    bool sidetone = false;
+    bool low_latency_monitoring = false;
+    uint32_t monitor_gain_percent = XSR_DEFAULT_MONITOR_GAIN_PERCENT;
 };
 
 struct Delivery {
@@ -116,6 +125,9 @@ public:
     uint32_t begin_local(std::string wav, Clock::time_point now, uint64_t& session);
     uint32_t end_local(uint64_t session, Clock::time_point now);
     void cancel_local(Clock::time_point now);
+    uint32_t begin_microphone_test(Clock::time_point now, uint64_t& session);
+    uint32_t end_microphone_test(uint64_t session, Clock::time_point now);
+    void cancel_microphone_test(Clock::time_point now);
     bool busy() const { return active_.has_value(); }
     bool ready() const { return ready_; }
     bool service_ready() const { return ready_ && configuration_confirmed_ && !draining_session_; }
@@ -138,7 +150,7 @@ private:
         bool released = false;
     };
 
-    uint32_t begin(int client, std::string wav, Clock::time_point now, uint64_t& session);
+    uint32_t begin(int client, std::string wav, Clock::time_point now, uint64_t& session, uint32_t monitor_gain_percent);
     uint32_t release(int client, uint64_t session, Clock::time_point now);
     void finish(uint32_t status, uint32_t stage, Json result, Clock::time_point now);
     void configure(Clock::time_point now);

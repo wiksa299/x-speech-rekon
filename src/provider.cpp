@@ -1,6 +1,9 @@
 #include "core.hpp"
+#include "activity.hpp"
 #include "desktop.hpp"
+#include "model_catalog.hpp"
 #include "window.hpp"
+#include "localization.hpp"
 
 #include <XPLMDataAccess.h>
 #include <XPLMMenus.h>
@@ -10,6 +13,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <stdexcept>
 #include <condition_variable>
 #include <cstdio>
@@ -29,7 +33,6 @@
 
 namespace {
 using namespace xsr;
-using xsr::localized;
 
 struct ModelName { const char* id; const char* label; };
 constexpr ModelName names[] = {
@@ -52,18 +55,18 @@ const char* model_label(const std::string& id) {
 
 const char* status_label(uint32_t code) {
     switch (code) {
-    case XSR_OK: return localized("Ready", "Prêt", "Listo");
-    case XSR_BUSY: return localized("Microphone in use", "Microphone occupé", "Micrófono ocupado");
-    case XSR_MODEL_UNAVAILABLE: return localized("Model unavailable", "Modèle indisponible", "Modelo no disponible");
-    case XSR_MIC_UNAVAILABLE: return localized("Microphone unavailable", "Microphone indisponible", "Micrófono no disponible");
-    case XSR_ENGINE_LOST: return localized("Engine stopped", "Moteur arrêté", "Motor detenido");
-    case XSR_ENGINE_RESTARTING: return localized("Engine starting", "Moteur en démarrage", "Iniciando el motor");
-    case XSR_TIMEOUT: return localized("Timed out", "Délai dépassé", "Tiempo agotado");
-    case XSR_CANCELLED: return localized("Cancelled", "Annulé", "Cancelado");
-    case XSR_NO_AUDIO: return localized("No audio captured", "Aucun son capturé", "No se ha capturado audio");
-    case XSR_NO_SPEECH: return localized("No speech detected", "Aucune parole détectée", "No se ha detectado habla");
-    case XSR_OUTPUT_TRUNCATED: return localized("Transcript too long", "Transcription trop longue", "Transcripción demasiado larga");
-    default: return localized("Transcription failed", "Échec de la transcription", "Error de transcripción");
+    case XSR_OK: return tr("ready");
+    case XSR_BUSY: return tr("microphone_in_use");
+    case XSR_MODEL_UNAVAILABLE: return tr("model_unavailable");
+    case XSR_MIC_UNAVAILABLE: return tr("microphone_unavailable");
+    case XSR_ENGINE_LOST: return tr("engine_stopped");
+    case XSR_ENGINE_RESTARTING: return tr("engine_starting");
+    case XSR_TIMEOUT: return tr("timed_out");
+    case XSR_CANCELLED: return tr("cancelled");
+    case XSR_NO_AUDIO: return tr("no_audio_captured");
+    case XSR_NO_SPEECH: return tr("no_speech_detected");
+    case XSR_OUTPUT_TRUNCATED: return tr("transcript_too_long");
+    default: return tr("transcription_failed");
     }
 }
 
@@ -77,21 +80,26 @@ void emphasized_text(const char* text, float extra_size = 3) {
     ImGui::Dummy({0, bounds.y + 2});
 }
 
-constexpr ImGuiChildFlags panel_flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY;
+constexpr auto panel_flags = xsr::settings_panel_flags;
 constexpr ImVec4 green_text{0.57f, 0.84f, 0.68f, 1};
 constexpr ImVec4 amber_text{0.94f, 0.73f, 0.46f, 1};
+constexpr ImVec4 red_text{0.96f, 0.60f, 0.60f, 1};
 constexpr ImVec4 primary_button{0.16f, 0.36f, 0.57f, 1};
+
+struct MicrophoneTest {
+    uint64_t session = 0;
+    uint32_t status = XSR_OK, capture_ms = 0, clipped = 0;
+    float level = -120, peak = -120;
+    std::optional<float> rms;
+    std::string device;
+    bool capturing = false, ending = false, has_take = false;
+    bool playing = false, playback_failed = false;
+};
 
 fs::path plugin_root() {
     char file[1024]{};
     XPLMGetPluginInfo(XPLMGetMyID(), nullptr, file, nullptr, nullptr);
     return fs::u8path(file).parent_path().parent_path();
-}
-
-fs::path preferences() {
-    char path[1024]{};
-    XPLMGetPrefsPath(path);
-    return fs::u8path(path).parent_path() / "x-speech-rekon.json";
 }
 
 fs::path engine_path(const fs::path& root) {
@@ -122,16 +130,22 @@ bool valid_catalog_entry(const Json& entry) {
     if (!string_fields(entry, {"id", "quant", "revision", "file", "sha256"}) ||
         !entry.contains("bytes") || !entry["bytes"].is_number_unsigned() || entry["bytes"] == 0 ||
         !entry.contains("urls") || !entry["urls"].is_array() || entry["urls"].empty()) return false;
-    return valid_digest(entry["sha256"].get_ref<const std::string&>()) &&
+    const Profile profile{entry.at("id"), {}, {}, {}, {}};
+    return profile.supported() && valid_digest(entry["sha256"].get_ref<const std::string&>()) &&
         std::all_of(entry["urls"].begin(), entry["urls"].end(), [](const Json& url) {
             return url.is_string() && url.get_ref<const std::string&>().rfind("https://", 0) == 0;
         });
 }
 
+bool same_catalog_profile(const Json& first, const Json& second) {
+    return first.at("id") == second.at("id") && first.at("quant") == second.at("quant");
+}
+
 Profile decode_profile(const Json& value) {
     if (!string_fields(value, {"id", "quant", "revision", "path", "sha256"}) ||
         !valid_digest(value["sha256"].get_ref<const std::string&>())) return {};
-    return {value["id"], value["quant"], value["revision"], value["path"], value["sha256"]};
+    Profile profile{value["id"], value["quant"], value["revision"], value["path"], value["sha256"]};
+    return profile.supported() ? profile : Profile{};
 }
 
 struct FileRequest {
@@ -210,27 +224,44 @@ enum class TestSource { microphone, reference, wav };
 const char* test_source_label(TestSource type) {
     switch (type) {
     case TestSource::reference:
-        return localized("Built-in recording", "Enregistrement fourni", "Grabación incluida");
+        return tr("built_in_recording");
     case TestSource::wav:
-        return localized("WAV file", "Fichier WAV", "Archivo WAV");
+        return tr("wav_file");
     default:
-        return localized("Microphone", "Microphone", "Micrófono");
+        return tr("microphone");
     }
 }
 
 const char* activity_status(uint32_t status, uint32_t stage, TestSource source = TestSource::microphone) {
+    if (status == XSR_TIMEOUT && stage == XSR_STAGE_CAPTURE_START)
+        return tr("microphone_start_timed_out");
+    if (status == XSR_TIMEOUT && stage == XSR_STAGE_CAPTURE)
+        return tr("capture_time_limit_reached");
     if (status == XSR_TIMEOUT && stage == XSR_STAGE_TRANSCRIPTION)
-        return localized("Transcription timed out", "Délai de transcription dépassé", "Tiempo de transcripción agotado");
+        return tr("transcription_timed_out");
     if (status == XSR_BAD_REQUEST && source != TestSource::microphone)
-        return localized("Unreadable WAV or longer than 30 seconds", "WAV illisible ou de plus de 30 secondes",
-                         "WAV ilegible o de más de 30 segundos");
+        return tr("unreadable_wav_or_longer_than_30_seconds");
     return status_label(status);
+}
+
+const char* activity_phase_label(ActivityPhase phase) {
+    switch (phase) {
+    case ActivityPhase::awaiting_audio:
+        return tr("starting_microphone_waiting_for_audio");
+    case ActivityPhase::capturing:
+        return tr("listening_audio_received");
+    case ActivityPhase::released_before_audio:
+        return tr("ptt_released_capture_unconfirmed");
+    case ActivityPhase::transcribing:
+        return tr("transcribing");
+    }
+    return "";
 }
 
 const char* latency_label(TestSource source) {
     return source == TestSource::microphone ?
-        localized("%u ms after release", "%u ms après relâchement", "%u ms tras soltar") :
-        localized("Test completed in %u ms", "Test terminé en %u ms", "Prueba completada en %u ms");
+        tr("release_latency") :
+        tr("test_latency");
 }
 
 struct Incident {
@@ -261,7 +292,7 @@ struct Activity {
     uint32_t stage = XSR_STAGE_NONE;
     uint32_t vocabulary = XSR_VOCAB_NONE;
     std::string model, quant, text;
-    std::optional<Clock::time_point> waiting_since;
+    ActivityProgress progress;
     std::optional<uint32_t> latency_ms;
     TestSource source = TestSource::microphone;
     bool pending = false;
@@ -270,20 +301,33 @@ struct Activity {
 
 class Provider {
 public:
-    Provider() : root_(plugin_root()), preferences_(preferences()), writer_(preferences_), process_(engine_path(root_)),
+    Provider() : root_(plugin_root()), preferences_(preferences_path()), writer_(preferences_), process_(engine_path(root_)),
         broker_([&](const Json& command) { return process_.send(command); },
                 [&](const Delivery& delivery) { pending_events_.push_back(delivery); }),
-        window_([&] { draw(); }, 620, 810, root_ / "NotoSans-Regular.ttf") {
-        catalog_ = json_file(root_ / "catalog.json");
+        window_([&] { draw(); }, 620, 810, root_ / "NotoSans-Regular.ttf", xplm_WindowDecorationRoundRectangle, true) {
+        catalog_ = Json::parse(built_in_model_catalog);
+        const auto installed_catalog = json_file(root_ / "catalog.json");
+        if (installed_catalog.is_array()) {
+            for (const auto& entry : installed_catalog) {
+                if (!valid_catalog_entry(entry)) continue;
+                const auto current = std::find_if(catalog_.begin(), catalog_.end(), [&](const Json& model) {
+                    return same_catalog_profile(model, entry);
+                });
+                if (current == catalog_.end()) catalog_.push_back(entry);
+                else *current = entry;
+            }
+        }
         catalog_error_ = !catalog_.is_array() || !std::all_of(catalog_.begin(), catalog_.end(), valid_catalog_entry);
         if (catalog_error_) catalog_ = Json::array();
+        initialize_interface(false);
         load_preferences();
         XPLMHostApplicationID host{};
         XPLMGetVersions(&xplane_version_, &sdk_version_, &host);
         menu_index_ = XPLMAppendMenuItem(XPLMFindPluginsMenu(), "X-Speech Rekon", nullptr, 0);
         menu_ = XPLMCreateMenu("X-Speech Rekon", XPLMFindPluginsMenu(), menu_index_, menu_callback, this);
-        XPLMAppendMenuItem(menu_, localized("Settings", "Réglages", "Ajustes"), nullptr, 0);
+        settings_item_ = XPLMAppendMenuItem(menu_, tr("settings"), nullptr, 0);
         XPLMRegisterFlightLoopCallback(tick_callback, -1, this);
+        if (show_micro_indicator_) update_micro_indicator();
     }
 
     ~Provider() {
@@ -308,6 +352,7 @@ public:
         if (command.struct_size < sizeof(command) || command.version != XSR_ABI_VERSION) return;
         if (command.operation == XSR_SUBSCRIBE && command.status == XSR_OK) {
             subscribers_[sender] = {plugin_string(sender, false), plugin_string(sender, true)};
+            if (subscribers_[sender].second == diagnostic_signature) notify_diagnostic(sender);
         } else if (command.operation == XSR_UNSUBSCRIBE && command.status == XSR_OK) {
             subscribers_.erase(sender);
             cancel_activity(sender);
@@ -315,7 +360,7 @@ public:
             add_activity(sender, command.session, command.status, plugin_string(sender, false),
                          TestSource::microphone, broker_.model_state() == XSR_MODEL_READY, now);
         } else if (command.operation == XSR_PTT_END && command.status == XSR_OK) {
-            if (auto* row = pending_activity(sender, command.session)) row->waiting_since = now;
+            if (auto* row = pending_activity(sender, command.session)) row->progress.processing_since = now;
         }
     }
 
@@ -386,6 +431,12 @@ private:
         }
         if (recovery && (broker_.ready() || waiting_for_hello_)) record_incident(XSR_ENGINE_LOST);
         broker_.engine_lost(now);
+        const bool microphone_interrupted = microphone_test_.session != 0;
+        microphone_test_ = {};
+        if (microphone_interrupted) microphone_test_.status = XSR_ENGINE_LOST;
+        microphone_test_supported_ = false;
+        low_latency_monitoring_supported_ = false;
+        last_monitoring_ = {};
         protocol_fault_ = false;
         clear_file_requests();
         waiting_for_hello_ = false;
@@ -404,8 +455,22 @@ private:
         scan_deferred_ = false;
     }
 
+    void notify_diagnostic(XPLMPluginID id) {
+        if (id != XPLM_NO_PLUGIN_ID && XPLMIsPluginEnabled(id)) {
+            auto preference = interface_locale().preference();
+            XPLMSendMessageToPlugin(id, interface_language_message, preference.data());
+        }
+    }
+
+    void refresh_language() {
+        if (interface_locale().refresh())
+            XPLMSetMenuItemName(menu_, settings_item_, tr("settings"), 0);
+    }
+
     float tick() {
+        refresh_language();
         const auto now = Clock::now();
+        if (microphone_panel_open_ && !window_.visible()) close_microphone_panel();
         for (auto it = subscribers_.begin(); it != subscribers_.end();) {
             if (!XPLMIsPluginEnabled(it->first) || plugin_string(it->first, true) != it->second.second) {
                 broker_.forget(it->first, now);
@@ -441,6 +506,11 @@ private:
             local_held_ = false;
         }
         dispatch_events();
+        if (micro_window_ && micro_window_->visible() && !micro_window_->pointer_pressed() &&
+            micro_window_->bounds() != micro_bounds_) {
+            micro_bounds_ = micro_window_->bounds();
+            save_preferences();
+        }
         const auto& profile = broker_.settings().profile;
         const auto& last_good = broker_.last_good();
         if (profile.path != persisted_profile_ || last_good.path != persisted_good_path_ ||
@@ -460,6 +530,8 @@ private:
                 return string_fields(device, {"id", "label"});
             })) throw std::runtime_error("Invalid engine devices");
             engine_version_ = message.at("version").get<std::string>();
+            microphone_test_supported_ = message.value("microphone_test", false);
+            low_latency_monitoring_supported_ = message.value("low_latency_monitoring", false);
             moonshine_version_ = message.value("moonshine_version", "");
             whisper_version_ = message.value("whisper_version", "");
             waiting_for_hello_ = false;
@@ -477,21 +549,52 @@ private:
             if (window_.visible()) process_.send({{"type", "microphones"}});
         } else if (type == "capture" || type == "level" || type == "result" || type == "state" ||
                    type == "inference_rejected") {
-            if (message.value("session", uint64_t(0)) == test_session_ && (type == "level" || type == "capture"))
+            const auto session = message.value("session", uint64_t(0));
+            const bool level_event = type == "level" || type == "capture";
+            if (type == "capture" && session && message.contains("monitoring")) {
+                const auto& monitoring = message.at("monitoring");
+                if (string_fields(monitoring, {"mode"}) && monitoring.contains("fallback") && monitoring["fallback"].is_boolean() &&
+                    monitoring.contains("stream_rate") && monitoring["stream_rate"].is_number_unsigned() &&
+                    monitoring.contains("output_rate") && monitoring["output_rate"].is_number_unsigned() &&
+                    monitoring.contains("output_period_frames") && monitoring["output_period_frames"].is_number_unsigned())
+                    last_monitoring_ = monitoring;
+            }
+            if (session == test_session_ && level_event)
                 test_level_ = message.value("level", 0.0f);
-            if (type == "result" && message.at("status") == XSR_OK &&
-                (!string_fields(message, {"text", "language"}) || !message.at("vocabulary").is_number_unsigned() ||
-                 !message.at("capture_ms").is_number_unsigned() || !message.at("compute_ms").is_number_unsigned()))
-                throw std::runtime_error("Invalid engine result");
+            if (session && session == microphone_test_.session && level_event && microphone_test_.capturing) {
+                const auto level = std::clamp(message.value("level", 0.0f), 0.000001f, 1.0f);
+                microphone_test_.level = 20.0f * std::log10(level);
+                microphone_test_.peak = std::max(microphone_test_.peak, microphone_test_.level);
+                microphone_test_.capture_ms = message.at("capture_ms").get<uint32_t>();
+                if (type == "capture") microphone_test_.device = message.value("microphone", "");
+            }
+            if (type == "result" && message.at("status") == XSR_OK) {
+                if (message.value("microphone_test", false)) {
+                    if (!message.at("capture_ms").is_number_unsigned() || !message.at("clipped").is_number_unsigned() ||
+                        !message.at("peak_dbfs").is_number() ||
+                        !(message.at("rms_dbfs").is_null() || message.at("rms_dbfs").is_number()))
+                        throw std::runtime_error("Invalid microphone test result");
+                } else if (!string_fields(message, {"text", "language"}) || !message.at("vocabulary").is_number_unsigned() ||
+                           !message.at("capture_ms").is_number_unsigned() || !message.at("compute_ms").is_number_unsigned()) {
+                    throw std::runtime_error("Invalid engine result");
+                }
+            }
             const auto path = broker_.settings().profile.path;
             const auto hash = broker_.settings().profile.sha256;
             broker_.accept(message, now);
             const auto& active = broker_.settings().profile;
             if (active.path != path || active.sha256 != hash) {
-                selected_id_ = active.id;
-                selected_quant_ = active.quant;
+                if (!model_picker_edited_) {
+                    selected_id_ = active.id;
+                    selected_quant_ = active.quant;
+                }
                 profile_recovered_ = true;
                 record_incident(XSR_MODEL_UNAVAILABLE);
+            }
+        } else if (type == "mic_playback") {
+            if (message.value("session", uint64_t(0)) == microphone_test_.session && microphone_test_.playing) {
+                microphone_test_.playing = false;
+                microphone_test_.playback_failed = !message.at("ok").get<bool>();
             }
         } else if (type == "microphones") {
             if (message.value("status", "ok") != "ok") return;
@@ -529,8 +632,6 @@ private:
                     for (const auto& file : models_) {
                         if (file.value("state", "") == "candidate") {
                             candidate = file.at("path").get<std::string>();
-                            selected_id_ = file.at("id").get<std::string>();
-                            selected_quant_ = file.at("quant").get<std::string>();
                             break;
                         }
                     }
@@ -543,8 +644,10 @@ private:
             const auto profile = decode_profile(message.value("model", Json{}));
             if (profile.available()) {
                 draft_.profile = profile;
-                selected_id_ = draft_.profile.id;
-                selected_quant_ = draft_.profile.quant;
+                if (!model_picker_edited_) {
+                    selected_id_ = draft_.profile.id;
+                    selected_quant_ = draft_.profile.quant;
+                }
                 broker_.set_settings(draft_, now);
                 save_preferences();
                 model_error_ = profile_recovered_ = false;
@@ -554,8 +657,10 @@ private:
                 if (!broker_.settings().profile.available() && broker_.last_good().available()) {
                     draft_.profile = broker_.last_good();
                     broker_.set_settings(draft_, now);
-                    selected_id_ = draft_.profile.id;
-                    selected_quant_ = draft_.profile.quant;
+                    if (!model_picker_edited_) {
+                        selected_id_ = draft_.profile.id;
+                        selected_quant_ = draft_.profile.quant;
+                    }
                     model_error_ = false;
                     profile_recovered_ = true;
                 }
@@ -591,16 +696,35 @@ private:
         std::vector<Delivery> events;
         events.swap(pending_events_);
         for (const auto& event : events) {
+            if (event.client == microphone_client) {
+                if (event.kind != XSR_RESULT || event.session != microphone_test_.session) continue;
+                auto& test = microphone_test_;
+                test.capturing = test.ending = false;
+                test.status = event.status;
+                test.has_take = event.status == XSR_OK;
+                if (test.has_take) {
+                    test.peak = test.level = event.result.at("peak_dbfs").get<float>();
+                    test.capture_ms = event.result.at("capture_ms").get<uint32_t>();
+                    test.clipped = event.result.at("clipped").get<uint32_t>();
+                    const auto& rms = event.result.at("rms_dbfs");
+                    if (!rms.is_null()) test.rms = rms.get<float>();
+                }
+                continue;
+            }
             std::optional<uint32_t> latency;
-            if (event.kind == XSR_RESULT) {
+            if (event.kind == XSR_CAPTURE_STARTED) {
+                if (auto* row = pending_activity(event.client, event.session))
+                    row->progress.confirm_audio(Clock::now());
+            } else if (event.kind == XSR_RESULT) {
                 if (auto* row = pending_activity(event.client, event.session)) {
                     row->status = event.status;
                     row->stage = event.stage;
                     row->pending = false;
                     record_incident(event.status, event.stage, row->source);
-                    if (event.status == XSR_OK && row->waiting_since) {
+                    if (event.status == XSR_OK && row->progress.processing_since) {
                         latency = static_cast<uint32_t>(
-                            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - *row->waiting_since).count());
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                Clock::now() - *row->progress.processing_since).count());
                         row->latency_ms = latency;
                     }
                     if (event.result.is_object()) {
@@ -661,7 +785,9 @@ private:
         row.pending = status == XSR_OK;
         row.source = source;
         row.model_was_loaded = model_was_loaded;
-        if (row.pending && source != TestSource::microphone) row.waiting_since = now;
+        row.progress.requested_at = now;
+        row.progress.microphone = source == TestSource::microphone;
+        if (row.pending && !row.progress.microphone) row.progress.processing_since = now;
         history_.push_front(std::move(row));
         if (history_.size() > 12) {
             const auto oldest = std::find_if(history_.rbegin(), history_.rend(), [](const Activity& item) {
@@ -689,12 +815,22 @@ private:
         folder_ = root_ / "models";
         const auto saved = json_file(preferences_);
         if (!saved.is_object()) return;
+        bool retired_profile = false;
         try {
             folder_ = fs::u8path(saved.value("folder", folder_.u8string()));
-            selected_id_ = saved.value("id", selected_id_);
-            selected_quant_ = saved.value("quant", selected_quant_);
-            startup_path_ = saved.value("path", "");
-            const auto last_good = decode_profile(saved.value("last_good", Json{}));
+            const Profile preferred{saved.value("id", selected_id_), saved.value("quant", selected_quant_), {},
+                                    saved.value("path", ""), {}};
+            if (preferred.supported()) {
+                selected_id_ = preferred.id;
+                selected_quant_ = preferred.quant;
+                startup_path_ = preferred.path;
+            } else {
+                retired_profile = true;
+            }
+            const auto saved_good = saved.value("last_good", Json{});
+            const auto last_good = decode_profile(saved_good);
+            if (string_fields(saved_good, {"id"}) && !saved_good["id"].get_ref<const std::string&>().empty() &&
+                !last_good.available()) retired_profile = true;
             broker_.restore_last_good(last_good);
             persisted_good_path_ = last_good.path;
             persisted_good_hash_ = last_good.sha256;
@@ -704,11 +840,21 @@ private:
             if (draft_.language != "en-US" && draft_.language != "fr-FR" && draft_.language != "es-ES")
                 draft_.language = "auto";
             draft_.early = saved.value("early", false);
+            draft_.sidetone = saved.value("sidetone", false);
+            draft_.low_latency_monitoring = saved.value("low_latency_monitoring", false);
+            draft_.monitor_gain_percent = std::clamp(saved.value("monitor_gain_percent", int(XSR_DEFAULT_MONITOR_GAIN_PERCENT)),
+                                                    0, int(XSR_MAX_MONITOR_GAIN_PERCENT));
+            show_micro_indicator_ = saved.value("show_micro_indicator", false);
+            show_micro_requester_ = saved.value("show_micro_requester", false);
+            micro_opacity_ = std::clamp(saved.value("micro_opacity", 65), 0, 100);
+            micro_border_opacity_ = std::clamp(saved.value("micro_border_opacity", 50), 0, 100);
+            micro_bounds_ = saved.value("micro_bounds", Window::Bounds{});
             draft_.load = saved.value("load", 0) == 1 ? LoadPolicy::on_activate : LoadPolicy::on_use;
             draft_.unload = static_cast<UnloadPolicy>(std::clamp(saved.value("unload", 2), 0, 2));
             draft_.idle_minutes = std::clamp(saved.value("idle_minutes", 5), 1, 60);
         } catch (const Json::exception&) {}
         broker_.set_settings(draft_, Clock::now());
+        if (retired_profile) save_preferences();
     }
 
     void save_preferences() {
@@ -721,10 +867,14 @@ private:
         persisted_good_path_ = last_good.path;
         persisted_good_hash_ = last_good.sha256;
         preferences_retry_at_ = Clock::now() + 5s;
-        Json saved = {{"folder", folder_.u8string()}, {"path", path}, {"id", id}, {"quant", quant},
+        Json saved = {{"interface_language", interface_locale().preference()}, {"folder", folder_.u8string()}, {"path", path}, {"id", id}, {"quant", quant},
             {"microphone", settings.microphone}, {"compute", settings.compute}, {"language", settings.language},
-            {"early", settings.early}, {"load", int(settings.load)},
-            {"unload", int(settings.unload)}, {"idle_minutes", settings.idle_minutes}};
+            {"early", settings.early}, {"sidetone", settings.sidetone},
+            {"low_latency_monitoring", settings.low_latency_monitoring}, {"monitor_gain_percent", settings.monitor_gain_percent},
+            {"load", int(settings.load)},
+            {"unload", int(settings.unload)}, {"idle_minutes", settings.idle_minutes},
+            {"show_micro_indicator", show_micro_indicator_}, {"show_micro_requester", show_micro_requester_},
+            {"micro_opacity", micro_opacity_}, {"micro_border_opacity", micro_border_opacity_}, {"micro_bounds", micro_bounds_}};
         if (last_good.available()) saved["last_good"] = {{"id", last_good.id}, {"quant", last_good.quant},
             {"revision", last_good.revision}, {"path", last_good.path}, {"sha256", last_good.sha256}};
         writer_.save(saved.dump(2, ' ', false, Json::error_handler_t::replace));
@@ -773,17 +923,26 @@ private:
     std::string compute_label(const std::string& id) const {
         if (id == "cpu") return "CPU";
         for (const auto& device : compute_devices_) if (device.at("id") == id) return device.at("label");
-        return localized("Vulkan unavailable", "Vulkan indisponible", "Vulkan no disponible");
+        return tr("vulkan_unavailable");
     }
 
     void draw();
     void draw_models();
     bool draw_recognition_settings();
+    bool draw_microphone_selector();
+    void draw_microphone_panel();
+    void draw_microphone_levels();
+    void request_microphone_panel();
+    void close_microphone_panel();
+    void clear_microphone_test();
     bool draw_compute_and_memory();
     void draw_test_page();
     void draw_tests();
     void draw_activity();
     void draw_recent_requests();
+    void draw_micro_indicator();
+    void update_micro_indicator();
+    void draw_micro_settings();
     void draw_settings();
     void draw_diagnostic();
     void start_test(TestSource source, std::string wav = {});
@@ -796,8 +955,12 @@ private:
     std::future<bool> engine_restart_;
     Broker broker_;
     Window window_;
+    std::unique_ptr<Window> micro_window_;
+    Window::Bounds micro_bounds_{};
+    int micro_opacity_ = 65, micro_border_opacity_ = 50;
+    bool show_micro_indicator_ = false, show_micro_requester_ = false;
     XPLMMenuID menu_ = nullptr;
-    int menu_index_ = 0;
+    int menu_index_ = 0, settings_item_ = 0;
     std::map<int, std::pair<std::string, std::string>> subscribers_;
     std::deque<Activity> history_;
     std::deque<Incident> incidents_;
@@ -818,13 +981,19 @@ private:
     std::optional<uint32_t> test_latency_ms_;
     bool wav_picker_failed_ = false, folder_picker_failed_ = false, scan_error_ = false, catalog_error_ = false;
     float test_level_ = 0;
+    MicrophoneTest microphone_test_;
+    bool microphone_test_supported_ = false, microphone_panel_open_ = false, microphone_panel_requested_ = false;
+    bool low_latency_monitoring_supported_ = false;
+    Json last_monitoring_;
     bool model_error_ = false, boot_selection_ = true, waiting_for_hello_ = false, shutting_down_ = false;
+    bool model_picker_edited_ = false;
     bool local_held_ = false, test_pending_ = false, listening_ = false;
     bool scan_deferred_ = false, protocol_fault_ = false, profile_recovered_ = false;
     Clock::time_point retry_at_{}, hello_deadline_{}, preferences_retry_at_{};
 };
 
 void Provider::draw() {
+    refresh_language();
     const auto& active = broker_.settings().profile;
     const auto state = broker_.model_state();
     const char* summary = status_label(broker_.ready() ? XSR_MODEL_UNAVAILABLE : engine_status_);
@@ -832,20 +1001,20 @@ void Provider::draw() {
     if (broker_.ready()) {
         switch (state) {
         case XSR_MODEL_READY:
-            summary = localized("Model loaded", "Modèle chargé", "Modelo cargado");
+            summary = tr("model_loaded");
             color = green_text;
             break;
         case XSR_MODEL_LOADING:
-            summary = localized("Loading model", "Chargement du modèle", "Cargando el modelo");
+            summary = tr("loading_model");
             break;
         case XSR_MODEL_UNLOADED:
-            summary = localized("Model ready to load", "Modèle prêt à charger", "Modelo listo para cargar");
+            summary = tr("model_ready_to_load");
             color = ImGui::GetStyleColorVec4(ImGuiCol_Text);
             break;
         }
     }
     const auto& actual = broker_.actual_compute();
-    const auto compute = broker_.cpu_fallback() ? localized("CPU (fallback)", "CPU (repli)", "CPU (respaldo)") :
+    const auto compute = broker_.cpu_fallback() ? tr("cpu_fallback") :
         actual.empty() ? (active.moonshine_voice() ? "CPU" : compute_label(draft_.compute)) : actual;
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     if (active.id.empty()) {
@@ -859,45 +1028,34 @@ void Provider::draw() {
         const auto now = Clock::now();
         const auto status = broker_.end_local(test_session_, now);
         if (status == XSR_OK) {
-            if (auto* row = pending_activity(local_client, test_session_)) row->waiting_since = now;
+            if (auto* row = pending_activity(local_client, test_session_)) row->progress.processing_since = now;
         } else if (test_pending_) test_status_ = status;
         local_held_ = false;
         listening_ = false;
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {12, 12});
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {10, 6});
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.164f, 0.176f, 0.199f, 1});
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, {0.16f, 0.176f, 0.199f, 1});
-    ImGui::PushStyleColor(ImGuiCol_Border, {0.25f, 0.27f, 0.30f, 1});
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, {0.207f, 0.226f, 0.267f, 1});
-    ImGui::PushStyleColor(ImGuiCol_Button, {0.205f, 0.256f, 0.330f, 1});
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.23f, 0.45f, 0.68f, 1});
-    ImGui::PushStyleColor(ImGuiCol_Tab, {0.165f, 0.187f, 0.225f, 1});
-    ImGui::PushStyleColor(ImGuiCol_TabSelected, {0.21f, 0.32f, 0.48f, 1});
+    xsr::push_settings_style();
     if (ImGui::BeginTabBar("provider-pages", ImGuiTabBarFlags_DrawSelectedOverline)) {
-        if (ImGui::BeginTabItem(localized("Settings###settings", "Réglages###settings", "Ajustes###settings"))) {
+        if (ImGui::BeginTabItem(ui_label("settings"))) {
             draw_settings();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(localized("Test###test", "Test###test", "Prueba###test"))) {
+        if (ImGui::BeginTabItem(ui_label("test"))) {
             draw_test_page();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(localized("Activity###activity", "Activité###activity", "Actividad###activity"))) {
+        if (ImGui::BeginTabItem(ui_label("activity"))) {
             draw_activity();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem(localized("Diagnostics###diagnostic", "Diagnostic###diagnostic", "Diagnóstico###diagnostic"))) {
+        if (ImGui::BeginTabItem(ui_label("diagnostics"))) {
             draw_diagnostic();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
-    ImGui::PopStyleColor(8);
-    ImGui::PopStyleVar(4);
+    draw_microphone_panel();
+    xsr::pop_settings_style();
 }
 
 void Provider::draw_settings() {
@@ -912,47 +1070,172 @@ void Provider::draw_settings() {
     ImGui::EndChild();
     if (ImGui::BeginChild("recognition", {}, panel_flags)) changed |= draw_recognition_settings();
     ImGui::EndChild();
+    if (ImGui::BeginChild("microphone-settings", {}, panel_flags)) {
+        window_.section_heading(tr("microphone"));
+        ImGui::TextWrapped("%s", microphone_label().c_str());
+        if (ImGui::Button(ui_label("configure_microphone")))
+            request_microphone_panel();
+        ImGui::BeginDisabled(broker_.busy());
+        changed |= ImGui::Checkbox(ui_label("microphone_monitoring"), &draft_.sidetone);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("monitoring_tooltip"));
+        if (draft_.sidetone) {
+            int gain = static_cast<int>(draft_.monitor_gain_percent);
+            if (ImGui::SliderInt(ui_label("monitoring_volume"),
+                                 &gain, 0, XSR_MAX_MONITOR_GAIN_PERCENT, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+                draft_.monitor_gain_percent = static_cast<uint32_t>(gain);
+                changed = true;
+            }
+            const char* modes[] = {ui_label("standard"),
+                                   ui_label("low_latency")};
+            int selected = draft_.low_latency_monitoring ? 1 : 0;
+            ImGui::BeginDisabled(!low_latency_monitoring_supported_);
+            ImGui::TextUnformatted(tr("monitoring_mode"));
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::Combo("##monitoring-mode", &selected, modes, IM_ARRAYSIZE(modes))) {
+                draft_.low_latency_monitoring = selected == 1;
+                changed = true;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::EndChild();
     if (changed) {
         draft_.profile = broker_.settings().profile;
         broker_.set_settings(draft_, Clock::now());
         save_preferences();
     }
+    if (ImGui::BeginChild("micro-indicator-settings", {}, panel_flags)) draw_micro_settings();
+    ImGui::EndChild();
+    if (ImGui::BeginChild("interface-settings", {}, panel_flags)) {
+        window_.section_heading(tr("interface_language"));
+        auto& locale = interface_locale();
+        const auto& current = locale.preference();
+        const char* preview = current == "auto" ? tr("follow_xplane") : locale.languages().at(current).c_str();
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##interface-language", preview)) {
+            std::string next;
+            if (ImGui::Selectable(ui_label("follow_xplane"), current == "auto")) next = "auto";
+            for (const auto& [code, name] : locale.languages()) {
+                const auto label = name + "###" + code;
+                if (ImGui::Selectable(label.c_str(), current == code)) next = code;
+            }
+            ImGui::EndCombo();
+            if (!next.empty() && next != current) {
+                locale.select(next);
+                XPLMSetMenuItemName(menu_, settings_item_, tr("settings"), 0);
+                notify_diagnostic(XPLMFindPluginBySignature(diagnostic_signature));
+                save_preferences();
+            }
+        }
+    }
+    ImGui::EndChild();
     ImGui::EndChild();
 }
 
+void Provider::update_micro_indicator() {
+    if (!show_micro_indicator_) {
+        if (micro_window_) micro_window_->hide();
+        return;
+    }
+    constexpr int width = 236;
+    const int height = show_micro_requester_ ? 68 : 46;
+    Window::Bounds bounds = micro_window_ ? micro_window_->bounds() : micro_bounds_;
+    if (bounds == Window::Bounds{}) {
+        int left, top, right, bottom;
+        XPLMGetScreenBoundsGlobal(&left, &top, &right, &bottom);
+        bounds = {left + 24, bottom + 24 + height, left + 24 + width, bottom + 24};
+    }
+    const auto current = bounds;
+    bounds[1] = bounds[3] + height;
+    bounds[2] = bounds[0] + width;
+    if (!micro_window_) {
+        micro_window_ = std::make_unique<Window>([this] { draw_micro_indicator(); }, width, height,
+            root_ / "NotoSans-Regular.ttf", xplm_WindowDecorationSelfDecorated);
+        micro_window_->set_padding({12.f, 8.f});
+        micro_window_->set_scroll_enabled(false);
+        micro_window_->set_bounds(bounds);
+    } else if (bounds != current) micro_window_->set_bounds(bounds);
+    micro_window_->set_drag_area(height);
+    micro_window_->set_background_opacity(static_cast<float>(micro_opacity_) / 100.0f);
+    micro_window_->set_border_opacity(static_cast<float>(micro_border_opacity_) / 100.0f);
+    if (!micro_window_->visible()) micro_window_->show("Rekon");
+}
+
+void Provider::draw_micro_settings() {
+    window_.section_heading(tr("microphone_indicator"));
+    bool changed = ImGui::Checkbox(ui_label("show_in_flight"),
+                                   &show_micro_indicator_);
+    changed |= ImGui::Checkbox(ui_label("show_requesting_plugin"), &show_micro_requester_);
+    changed |= ImGui::SliderInt(ui_label("background_opacity"), &micro_opacity_, 0, 100, "%d%%",
+                                ImGuiSliderFlags_AlwaysClamp);
+    changed |= ImGui::SliderInt(ui_label("border_opacity"), &micro_border_opacity_, 0, 100, "%d%%",
+                                ImGuiSliderFlags_AlwaysClamp);
+    if (changed) {
+        update_micro_indicator();
+        save_preferences();
+    }
+}
+
+void Provider::draw_micro_indicator() {
+    const auto active = std::find_if(history_.begin(), history_.end(), [](const Activity& row) {
+        return row.pending && row.progress.microphone && !row.progress.processing_since;
+    });
+    const bool listening = active != history_.end() && active->progress.phase() == ActivityPhase::capturing;
+    const auto color = active == history_.end() ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) :
+        listening ? green_text : amber_text;
+    const char* state = active == history_.end() ? tr("idle") :
+        listening ? tr("capture") :
+        tr("waiting_for_audio");
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    const auto ink = ImGui::GetColorU32(color);
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddRect({at.x + 6, at.y}, {at.x + 14, at.y + 14}, ink, 4.0f, 0, 1.5f);
+    draw->PathArcTo({at.x + 10, at.y + 9}, 7.0f, 0.0f, 3.14159265f);
+    draw->PathStroke(ink, 0, 1.5f);
+    draw->AddLine({at.x + 10, at.y + 16}, {at.x + 10, at.y + 21}, ink, 1.5f);
+    draw->AddLine({at.x + 6, at.y + 21}, {at.x + 14, at.y + 21}, ink, 1.5f);
+    ImGui::Indent(27);
+    ImGui::PushStyleColor(ImGuiCol_Text, color);
+    emphasized_text(state);
+    ImGui::PopStyleColor();
+    if (show_micro_requester_ && active != history_.end()) {
+        const char* name = active->client == local_client ? test_source_label(active->source) : active->name.c_str();
+        ImGui::TextUnformatted(name);
+    }
+    ImGui::Unindent(27);
+}
+
 void Provider::draw_models() {
-    emphasized_text(localized("Model", "Modèle", "Modelo"));
+    window_.section_heading(tr("model"));
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##model", model_label(selected_id_))) {
         for (const auto& model : names) {
             const Profile choice{model.id, {}, {}, {}, {}};
-            if (choice.whisper_cpp() && whisper_version_.empty()) continue;
             if (choice.moonshine_voice() && std::none_of(catalog_.begin(), catalog_.end(),
                     [&](const Json& entry) { return entry.at("id") == model.id; })) continue;
             if (ImGui::Selectable(model.label, selected_id_ == model.id)) {
                 selected_id_ = model.id;
                 selected_quant_ = choice.moonshine_voice() ? "ORT" : "Q8_0";
+                model_picker_edited_ = true;
             }
         }
         ImGui::EndCombo();
     }
     if (selected_id_ == parakeet_v2_id || selected_id_ == whisper_cpp_id || selected_id_ == whisper_transcribe_id) {
-        ImGui::TextDisabled("%s", localized("English only", "Anglais uniquement", "Solo inglés"));
+        ImGui::TextDisabled("%s", tr("english_only"));
     }
     if (selected_quant_ == "ORT") {
-        ImGui::TextDisabled("%s", localized("CPU · English", "CPU · Anglais", "CPU · Inglés"));
+        ImGui::TextDisabled("%s", tr("cpu_english"));
     } else {
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(localized("Quantization", "Quantification", "Cuantización"));
+        ImGui::TextUnformatted(tr("quantization"));
         const bool label_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
         ImGui::SameLine(0, 5);
         ImGui::TextDisabled("(?)");
         if ((label_hovered || ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) && ImGui::BeginTooltip()) {
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24 * ImGui::GetFontSize());
-            ImGui::TextUnformatted(localized(
-                "Quantization reduces the model’s size. Q4 is smaller, Q8 preserves more of the original precision, and Q6 is in between.",
-                "La quantification réduit la taille du modèle. Q4 est plus compact, Q8 préserve mieux la précision d’origine, et Q6 est entre les deux.",
-                "La cuantización reduce el tamaño del modelo. Q4 ocupa menos, Q8 conserva mejor la precisión original y Q6 queda entre ambos."));
+            ImGui::TextUnformatted(tr("quantization_tooltip"));
             ImGui::PopTextWrapPos();
             ImGui::EndTooltip();
         }
@@ -964,7 +1247,10 @@ void Provider::draw_models() {
             const bool selected = selected_quant_ == quant;
             if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
             ImGui::BeginDisabled(!available);
-            if (ImGui::Button(quant)) selected_quant_ = quant;
+            if (ImGui::Button(quant)) {
+                selected_quant_ = quant;
+                model_picker_edited_ = true;
+            }
             ImGui::EndDisabled();
             if (selected) ImGui::PopStyleColor();
             if (std::strcmp(quant, "Q8_0") != 0) ImGui::SameLine();
@@ -975,20 +1261,22 @@ void Provider::draw_models() {
     if (artifact) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%.1f %s · %s", artifact->at("bytes").get<double>() / 1000000.0,
-            localized("MB", "Mo", "MB"),
-            candidate.empty() ? localized("Not installed", "Absent du dossier", "Sin instalar") :
-                                localized("Found locally", "Présent dans le dossier", "Encontrado en la carpeta"));
+            tr("mb"),
+            candidate.empty() ? tr("not_installed") :
+                                tr("found_locally"));
         ImGui::PopStyleColor();
     }
-    ImGui::BeginDisabled(!broker_.ready() || identify_ticket_ || browse_ticket_ || wav_ticket_ ||
+    const bool missing_whisper = selected_id_ == whisper_cpp_id && broker_.ready() && whisper_version_.empty();
+    if (missing_whisper) ImGui::TextWrapped("%s", tr("whisper_engine_missing_from_this_installation"));
+    ImGui::BeginDisabled(!broker_.ready() || missing_whisper || identify_ticket_ || browse_ticket_ || wav_ticket_ ||
                          candidate.empty() || broker_.busy());
     ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
-    if (ImGui::Button(localized("Use this model", "Utiliser ce modèle", "Usar este modelo"))) identify(candidate);
+    if (ImGui::Button(ui_label("use_this_model"))) identify(candidate);
     ImGui::PopStyleColor();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(!broker_.ready() || !artifact || !candidate.empty() || download_ticket_ || browse_ticket_);
-    if (ImGui::Button(localized("Download", "Télécharger", "Descargar"))) {
+    ImGui::BeginDisabled(!broker_.ready() || !artifact || download_ticket_ || browse_ticket_);
+    if (ImGui::Button(ui_label("download"))) {
         if (file_request(download_ticket_, {{"type", "download"}, {"path", folder_.u8string()}, {"entry", *artifact}},
                          30min)) {
             download_total_ = artifact->at("bytes").get<uint64_t>();
@@ -999,42 +1287,39 @@ void Provider::draw_models() {
     ImGui::EndDisabled();
     if (download_ticket_) {
         ImGui::ProgressBar(download_total_ ? float(double(downloaded_) / double(download_total_)) : 0.f);
-        if (ImGui::Button(localized("Cancel transfer", "Annuler le transfert", "Cancelar descarga")))
+        if (ImGui::Button(ui_label("cancel_transfer")))
             process_.send({{"type", "cancel_download"}});
     } else if (download_state_ == "ok") {
-        ImGui::TextUnformatted(localized("Download verified", "Téléchargement vérifié", "Descarga verificada"));
+        ImGui::TextUnformatted(tr("download_verified"));
     } else if (download_state_ == "cancelled") {
         ImGui::TextUnformatted(status_label(XSR_CANCELLED));
+    } else if (download_state_ == "exists") {
+        ImGui::TextWrapped("%s", tr("model_filename_conflict"));
     } else if (!download_state_.empty()) {
-        ImGui::TextWrapped("%s", localized("Could not install the download", "Installation du téléchargement impossible",
-                                           "No se pudo instalar la descarga"));
+        ImGui::TextWrapped("%s", tr("could_not_install_the_download"));
     }
-    if (catalog_error_) ImGui::TextWrapped("%s", localized("Invalid model catalog", "Catalogue des modèles invalide",
-                                                            "Catálogo de modelos no válido"));
+    if (catalog_error_) ImGui::TextWrapped("%s", tr("invalid_model_catalog"));
     if (model_error_) ImGui::TextWrapped("%s", status_label(XSR_MODEL_UNAVAILABLE));
-    if (profile_recovered_) ImGui::TextWrapped("%s", localized("Restored the last working model",
-        "Dernier modèle utilisable restauré", "Se restauró el último modelo funcional"));
-    if (!ImGui::TreeNode(localized("Models folder", "Dossier des modèles", "Carpeta de modelos"))) return;
+    if (profile_recovered_) ImGui::TextWrapped("%s", tr("restored_the_last_working_model"));
+    if (!ImGui::TreeNode(ui_label("models_folder"))) return;
     ImGui::TextWrapped("%s", folder_.u8string().c_str());
     ImGui::BeginDisabled(!broker_.ready() || browse_ticket_ || wav_ticket_ || scan_ticket_ || identify_ticket_);
 #ifdef _WIN32
     ImGui::BeginDisabled(bool(download_ticket_));
-    if (ImGui::Button(localized("Browse…", "Parcourir…", "Examinar…"))) {
+    if (ImGui::Button(ui_label("browse"))) {
         folder_picker_failed_ = !file_request(browse_ticket_, {{"type", "browse"}}, 10min);
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
 #endif
-    if (ImGui::Button(localized("Rescan", "Actualiser", "Volver a buscar"))) scan();
+    if (ImGui::Button(ui_label("rescan"))) scan();
     ImGui::EndDisabled();
-    if (scan_error_) ImGui::TextWrapped("%s", localized("Could not scan the models folder",
-        "Impossible d’analyser le dossier des modèles", "No se pudo examinar la carpeta de modelos"));
-    if (folder_picker_failed_) ImGui::TextWrapped("%s", localized("Could not open the folder picker",
-        "Impossible d’ouvrir le sélecteur de dossier", "No se pudo abrir el selector de carpetas"));
+    if (scan_error_) ImGui::TextWrapped("%s", tr("could_not_scan_the_models_folder"));
+    if (folder_picker_failed_) ImGui::TextWrapped("%s", tr("could_not_open_the_folder_picker"));
     const bool incompatible = std::any_of(models_.begin(), models_.end(), [](const Json& model) {
         return model.value("state", "") != "candidate";
     });
-    if (incompatible && ImGui::TreeNode(localized("Incompatible files", "Fichiers incompatibles", "Archivos incompatibles"))) {
+    if (incompatible && ImGui::TreeNode(ui_label("incompatible_files"))) {
         for (const auto& model : models_) {
             if (model.value("state", "") == "candidate") continue;
             const auto path = fs::u8path(model.at("path").get<std::string>()).filename().u8string();
@@ -1047,22 +1332,19 @@ void Provider::draw_models() {
 
 std::string Provider::microphone_label() const {
     if (draft_.microphone.empty())
-        return localized("System default", "Par défaut du système", "Predeterminado del sistema");
+        return tr("system_default");
     for (const auto& mic : microphones_)
         if (mic.at("id") == draft_.microphone) return mic.at("name").get<std::string>();
-    return localized("Selected microphone missing", "Microphone sélectionné absent", "Falta el micrófono seleccionado");
+    return tr("selected_microphone_missing");
 }
 
-bool Provider::draw_recognition_settings() {
-    emphasized_text(localized("Recognition", "Reconnaissance", "Reconocimiento"));
-    const char* default_input = localized("System default", "Par défaut du système", "Predeterminado del sistema");
+bool Provider::draw_microphone_selector() {
+    const char* default_input = ui_label("system_default");
     const auto current = microphone_label();
-    ImGui::TextUnformatted(localized("Microphone", "Microphone", "Micrófono"));
-    ImGui::BeginDisabled(broker_.busy());
     bool changed = false;
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##microphone", current.c_str())) {
-        if (ImGui::Selectable(default_input, draft_.microphone.empty())) {
+        if (ImGui::Selectable(default_input, draft_.microphone.empty()) && !draft_.microphone.empty()) {
             draft_.microphone.clear();
             changed = true;
         }
@@ -1070,7 +1352,7 @@ bool Provider::draw_recognition_settings() {
             auto id = mic.at("id").get<std::string>();
             const auto name = mic.at("name").get<std::string>();
             ImGui::PushID(id.c_str());
-            if (ImGui::Selectable(name.c_str(), draft_.microphone == id)) {
+            if (ImGui::Selectable(name.c_str(), draft_.microphone == id) && draft_.microphone != id) {
                 draft_.microphone = id;
                 changed = true;
             }
@@ -1078,13 +1360,217 @@ bool Provider::draw_recognition_settings() {
         }
         ImGui::EndCombo();
     }
+    return changed;
+}
+
+void Provider::request_microphone_panel() {
+    microphone_panel_requested_ = true;
+    if (broker_.ready()) process_.send({{"type", "microphones"}});
+}
+
+void Provider::clear_microphone_test() {
+    if (microphone_test_.capturing) broker_.cancel_microphone_test(Clock::now());
+    if (microphone_test_.session && broker_.ready())
+        process_.send({{"type", "mic_clear"}, {"session", microphone_test_.session}});
+    microphone_test_ = {};
+}
+
+void Provider::close_microphone_panel() {
+    microphone_panel_open_ = false;
+    clear_microphone_test();
+}
+
+void Provider::draw_microphone_panel() {
+    const char* title = ui_label("microphone");
+    if (microphone_panel_requested_) {
+        microphone_panel_requested_ = false;
+        microphone_panel_open_ = true;
+        ImGui::OpenPopup(title);
+    }
+    if (!ImGui::IsPopupOpen(title)) return;
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float width = std::clamp(display.x - 24, 220.f, 570.f);
+    ImGui::SetNextWindowSizeConstraints({width, 0}, {width, std::max(140.f, display.y - 24)});
+    bool keep_open = true;
+    if (ImGui::BeginPopupModal(title, &keep_open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        if (!microphone_panel_open_ || !keep_open) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            if (ImGui::BeginChild("mic-input", {}, panel_flags)) {
+                window_.section_heading(tr("audio_input"));
+                ImGui::BeginDisabled(broker_.busy() || microphone_test_.playing);
+                if (draw_microphone_selector()) {
+                    clear_microphone_test();
+                    draft_.profile = broker_.settings().profile;
+                    broker_.set_settings(draft_, Clock::now());
+                    save_preferences();
+                }
+                ImGui::BeginDisabled(!broker_.ready());
+                if (ImGui::Button(ui_label("refresh_devices")))
+                    process_.send({{"type", "microphones"}});
+                ImGui::EndDisabled();
+                ImGui::EndDisabled();
+                if (!microphone_test_.device.empty()) {
+                    ImGui::TextWrapped("%s · %s", tr("captured_from"),
+                                       microphone_test_.device.c_str());
+                } else if (draft_.microphone.empty()) {
+                    const auto device = std::find_if(microphones_.begin(), microphones_.end(),
+                        [](const Json& item) { return item.value("default", false); });
+                    if (device != microphones_.end())
+                        ImGui::TextWrapped("%s · %s", tr("detected_default"),
+                                           device->at("name").get_ref<const std::string&>().c_str());
+                }
+            }
+            ImGui::EndChild();
+            if (ImGui::BeginChild("mic-levels", {}, panel_flags)) draw_microphone_levels();
+            ImGui::EndChild();
+            if (ImGui::BeginChild("mic-review", {}, panel_flags)) {
+                const auto& take = microphone_test_;
+                window_.section_heading(tr("listen_to_the_recording"));
+                ImGui::BeginDisabled(!take.has_take || (!take.playing && broker_.busy()));
+                const auto label = take.playing ? ui_label("stop_playback") :
+                    ui_label("play_recording");
+                if (ImGui::Button(label)) {
+                    const auto sent = process_.send({{"type", take.playing ? "mic_stop" : "mic_play"}, {"session", take.session}});
+                    if (!take.playing) microphone_test_.playing = sent;
+                    microphone_test_.playback_failed = !sent;
+                }
+                ImGui::EndDisabled();
+                const auto note = take.playback_failed ? tr("audio_output_unavailable") :
+                    take.has_take ? tr("recording_retention") :
+                    tr("make_a_recording_with_the_guided_test");
+                ImGui::TextWrapped("%s", note);
+            }
+            ImGui::EndChild();
+            if (ImGui::Button(ui_label("close"))) {
+                keep_open = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
+    if (!keep_open || (microphone_panel_open_ && !ImGui::IsPopupOpen(title))) close_microphone_panel();
+}
+
+void Provider::draw_microphone_levels() {
+    auto& take = microphone_test_;
+    window_.section_heading(tr("capture_level"));
+    const char* status = status_label(take.status);
+    const char* guide = tr("microphone_test_instructions");
+    ImVec4 color = take.status == XSR_OK ? green_text : amber_text;
+    if (take.capturing) {
+        status = take.ending ? tr("finishing") :
+            take.capture_ms ? tr("listening") :
+            tr("starting_microphone");
+        if (take.capture_ms < 2000)
+            guide = tr("stay_quiet_for_two_seconds");
+        else if (take.capture_ms < 7000)
+            guide = tr("speak_normally_as_in_flight");
+        else
+            guide = tr("speak_a_little_louder_now");
+    } else if (take.has_take) {
+        color = amber_text;
+        if (take.clipped || take.peak >= -2) {
+            color = take.clipped ? red_text : amber_text;
+            status = take.clipped ? tr("clipping_detected") :
+                tr("close_to_clipping");
+            guide = tr("lower_input_gain");
+        } else if (take.capture_ms < 2200) {
+            status = tr("test_too_short");
+            guide = tr("repeat_the_test_and_speak_when_prompted");
+        } else if (!take.rms) {
+            status = status_label(XSR_NO_SPEECH);
+            guide = tr("check_input_permissions");
+        } else if (*take.rms < -40 || take.peak < -30) {
+            status = tr("signal_is_weak");
+            guide = tr("raise_input_gain");
+        } else {
+            color = green_text;
+            status = tr("good_level");
+            guide = tr("your_voice_has_room_before_clipping");
+        }
+    } else if (take.status == XSR_MIC_UNAVAILABLE || take.status == XSR_NO_AUDIO) {
+        guide = tr("check_input_permissions");
+    } else if (broker_.busy()) {
+        status = status_label(XSR_BUSY);
+        color = amber_text;
+    } else if (!microphone_test_supported_) {
+        status = broker_.ready() ? tr("update_the_rekon_engine") :
+            status_label(XSR_ENGINE_RESTARTING);
+        color = amber_text;
+    }
+    ImGui::TextColored(color, "%s", status);
+
+    const auto pos = ImGui::GetCursorScreenPos();
+    const float width = std::max(1.f, ImGui::GetContentRegionAvail().x);
+    constexpr float height = 12.f;
+    const auto x = [&](float db) { return pos.x + width * (1 + std::clamp(db, -60.f, 0.f) / 60.f); };
+    auto* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(pos, {pos.x + width, pos.y + height}, ImGui::GetColorU32(ImGuiCol_FrameBg), 3);
+    const float level = take.capturing ? take.level : take.peak;
+    const auto segment = [&](float low, float high, ImU32 fill) {
+        if (level > low) draw->AddRectFilled({x(low), pos.y}, {x(std::min(high, level)), pos.y + height}, fill);
+    };
+    segment(-60, -18, IM_COL32(99, 150, 209, 255));
+    segment(-18, -6, IM_COL32(111, 195, 155, 255));
+    segment(-6, -2, IM_COL32(234, 192, 117, 255));
+    segment(-2, 0, IM_COL32(239, 143, 143, 255));
+    if (take.peak > -60) draw->AddLine({x(take.peak), pos.y - 2}, {x(take.peak), pos.y + height + 2}, IM_COL32_WHITE, 2);
+    ImGui::Dummy({width, height});
+    ImGui::TextDisabled("−60");
+    ImGui::SameLine(std::max(10.f, ImGui::GetCursorPosX() + width - ImGui::CalcTextSize("0 dBFS").x));
+    ImGui::TextDisabled("0 dBFS");
+
+    if (ImGui::BeginTable("mic-stats", 3, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::TableNextColumn();
+        ImGui::TextWrapped("%s", tr("max_peak"));
+        if (take.has_take || take.capture_ms) ImGui::Text("%.1f dBFS", take.peak);
+        else ImGui::TextDisabled("—");
+        ImGui::TableNextColumn();
+        ImGui::TextWrapped("%s", tr("average_voice_level"));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("speech_rms_tooltip"));
+        if (take.rms) ImGui::Text("%.1f dBFS", *take.rms);
+        else ImGui::TextDisabled("—");
+        ImGui::TableNextColumn();
+        ImGui::TextWrapped("%s", tr("clipping"));
+        ImGui::TextUnformatted(take.clipped ? tr("yes") : take.has_take ?
+            tr("none") : "—");
+        ImGui::EndTable();
+    }
+    ImGui::TextWrapped("%s", guide);
+    const bool can_start = microphone_test_supported_ && broker_.service_ready() && !broker_.busy() && !take.playing;
+    ImGui::BeginDisabled(take.capturing ? take.ending : !can_start);
+    ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
+    if (ImGui::Button(take.capturing ? ui_label("finish_test") :
+                                      ui_label("start_test"))) {
+        const auto now = Clock::now();
+        if (take.capturing) {
+            take.ending = broker_.end_microphone_test(take.session, now) == XSR_OK;
+        } else {
+            clear_microphone_test();
+            take.status = broker_.begin_microphone_test(now, take.session);
+            take.capturing = take.status == XSR_OK;
+        }
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    const auto seconds = microphone_test_seconds - std::min(microphone_test_seconds, take.capture_ms / 1000);
+    if (take.capturing) ImGui::TextDisabled(tr("seconds_remaining"), seconds);
+    else ImGui::TextDisabled("%u s", microphone_test_seconds);
+}
+
+bool Provider::draw_recognition_settings() {
+    window_.section_heading(tr("recognition"));
+    ImGui::BeginDisabled(broker_.busy());
+    bool changed = false;
     const auto& active = broker_.settings().profile;
     if (active.nemotron()) {
         const char* ids[] = {"auto", "en-US", "fr-FR", "es-ES"};
-        const char* languages[] = {localized("Auto", "Automatique", "Automático"), "English", "Français", "Español"};
+        const char* languages[] = {ui_label("auto"), "English", "Français", "Español"};
         int index = 0;
         for (int i = 1; i < 4; ++i) if (draft_.language == ids[i]) index = i;
-        ImGui::TextUnformatted(localized("Recognition language", "Langue de reconnaissance", "Idioma de reconocimiento"));
+        ImGui::TextUnformatted(tr("recognition_language"));
         ImGui::SetNextItemWidth(-1);
         if (ImGui::Combo("##recognition-language", &index, languages, 4)) {
             draft_.language = ids[index];
@@ -1092,13 +1578,11 @@ bool Provider::draw_recognition_settings() {
         }
     }
     ImGui::BeginDisabled(!active.streaming());
-    changed |= ImGui::Checkbox(localized("Early decoding", "Décodage anticipé", "Decodificación anticipada"), &draft_.early);
+    changed |= ImGui::Checkbox(ui_label("early_decoding"), &draft_.early);
     ImGui::EndDisabled();
     if (active.nemotron() && draft_.early) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TextWrapped("%s", localized("Vocabulary requires decoding after release.",
-            "Le vocabulaire s’applique au décodage après relâchement.",
-            "El vocabulario se aplica al decodificar después de soltar."));
+        ImGui::TextWrapped("%s", tr("vocabulary_requires_decoding_after_release"));
         ImGui::PopStyleColor();
     }
 
@@ -1107,18 +1591,18 @@ bool Provider::draw_recognition_settings() {
 }
 
 bool Provider::draw_compute_and_memory() {
-    const char* heading = localized("Compute and memory", "Calcul et mémoire", "Cálculo y memoria");
-    const char* automatic = localized("Applies automatically", "Application automatique", "Aplicación automática");
+    const char* heading = tr("compute_and_memory");
+    const char* automatic = tr("applies_automatically");
     const float automatic_width = ImGui::CalcTextSize(automatic).x;
     const float room_for_heading = ImGui::GetContentRegionAvail().x;
     const float automatic_x = ImGui::GetCursorPosX() + room_for_heading - automatic_width;
-    emphasized_text(heading);
+    window_.section_heading(heading);
     if (1.2f * ImGui::CalcTextSize(heading).x + automatic_width + 16 <= room_for_heading)
         ImGui::SameLine(automatic_x);
     ImGui::TextDisabled("%s", automatic);
     ImGui::BeginDisabled(broker_.busy());
     bool changed = false;
-    ImGui::TextUnformatted(localized("Compute device", "Périphérique de calcul", "Dispositivo de cálculo"));
+    ImGui::TextUnformatted(tr("compute_device"));
     const bool cpu_only = broker_.settings().profile.moonshine_voice();
     const auto compute = cpu_only ? "CPU" : compute_label(draft_.compute);
     ImGui::SetNextItemWidth(-1);
@@ -1144,21 +1628,21 @@ bool Provider::draw_compute_and_memory() {
 
     int load = int(draft_.load), unload = int(draft_.unload);
     const char* loads[] = {
-        localized("On first use", "Au premier usage", "En el primer uso"),
-        localized("On activation", "À l'activation", "Al activar")
+        ui_label("on_first_use"),
+        ui_label("on_activation")
     };
     const char* unloads[] = {
-        localized("After each use", "Après chaque usage", "Después de cada uso"),
-        localized("On deactivation", "À la désactivation", "Al desactivar"),
-        localized("After inactivity", "Après inactivité", "Tras la inactividad")
+        ui_label("after_each_use"),
+        ui_label("on_deactivation"),
+        ui_label("after_inactivity")
     };
     const float room = ImGui::GetContentRegionAvail().x;
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const bool two_columns = room >= 315;
     const float combo_width = (room - gap) / 2;
     const float second_column = ImGui::GetCursorPosX() + combo_width + gap;
-    const char* unload_label = localized("Unload model", "Décharger", "Liberar memoria");
-    ImGui::TextUnformatted(localized("Load model", "Charger", "Cargar"));
+    const char* unload_label = tr("unload_model");
+    ImGui::TextUnformatted(tr("load_model"));
     if (two_columns) {
         ImGui::SameLine(second_column);
         ImGui::TextUnformatted(unload_label);
@@ -1172,7 +1656,7 @@ bool Provider::draw_compute_and_memory() {
     draft_.load = static_cast<LoadPolicy>(load);
     draft_.unload = static_cast<UnloadPolicy>(unload);
     if (draft_.unload == UnloadPolicy::after_idle) {
-        ImGui::TextUnformatted(localized("Idle time (min)", "Inactivité (min)", "Inactividad (min)"));
+        ImGui::TextUnformatted(tr("idle_time_min"));
         ImGui::SetNextItemWidth(-1);
         changed |= ImGui::SliderInt("##idle-minutes", &draft_.idle_minutes, 1, 60);
     }
@@ -1181,7 +1665,7 @@ bool Provider::draw_compute_and_memory() {
     ImGui::Separator();
     const bool restarting = engine_restart_.valid() || waiting_for_hello_;
     ImGui::BeginDisabled(restarting || broker_.busy() || download_ticket_ || identify_ticket_ || browse_ticket_ || wav_ticket_);
-    if (ImGui::Button(localized("Restart engine", "Redémarrer le moteur", "Reiniciar el motor"))) restart_engine();
+    if (ImGui::Button(ui_label("restart_engine"))) restart_engine();
     ImGui::EndDisabled();
     return changed;
 }
@@ -1189,7 +1673,9 @@ bool Provider::draw_compute_and_memory() {
 void Provider::start_test(TestSource source, std::string wav) {
     if (source == TestSource::reference) {
         const auto& settings = broker_.settings();
-        const char* file = localized("test-en.wav", "test-fr.wav", "test-es.wav");
+        const auto simulator = XPLMGetLanguage();
+        const char* file = simulator == xplm_Language_French ? "test-fr.wav" :
+                           simulator == xplm_Language_Spanish ? "test-es.wav" : "test-en.wav";
         if (settings.profile.nemotron()) {
             if (settings.language == "en-US") file = "test-en.wav";
             if (settings.language == "fr-FR") file = "test-fr.wav";
@@ -1222,39 +1708,40 @@ void Provider::draw_test_page() {
 }
 
 void Provider::draw_tests() {
-    emphasized_text(localized("Recognition test", "Test de reconnaissance", "Prueba de reconocimiento"));
+    window_.section_heading(tr("recognition_test"));
+    if (ImGui::Button(ui_label("check_microphone")))
+        request_microphone_panel();
     const bool unavailable = !broker_.ready() || broker_.model_state() == XSR_MODEL_MISSING;
     ImGui::BeginDisabled(unavailable || wav_ticket_ || (broker_.busy() && !local_held_));
     ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
-    ImGui::Button(localized("Hold to talk", "Maintenir pour parler", "Mantén pulsado para hablar"), {-1, 40});
+    ImGui::Button(ui_label("hold_to_talk"), {-1, 40});
     ImGui::PopStyleColor();
     if (ImGui::IsItemActivated() && !local_held_) start_test(TestSource::microphone);
     ImGui::EndDisabled();
 
-    ImGui::TextDisabled("%s", localized("Microphone level", "Niveau du microphone", "Nivel del micrófono"));
+    ImGui::TextDisabled("%s", tr("microphone_level"));
     ImGui::ProgressBar(local_held_ ? test_level_ : 0.0f, {-1, 7}, "");
     ImGui::BeginDisabled(unavailable || broker_.busy() || wav_ticket_);
-    if (ImGui::Button(localized("Test the built-in recording", "Tester l’enregistrement fourni", "Probar la grabación incluida"), {-1, 0}))
+    if (ImGui::Button(ui_label("test_the_built_in_recording"), {-1, 0}))
         start_test(TestSource::reference);
     ImGui::BeginDisabled(bool(browse_ticket_));
-    if (ImGui::Button(localized("Choose a WAV file…", "Choisir un fichier WAV…", "Elegir un archivo WAV…"), {-1, 0})) {
+    if (ImGui::Button(ui_label("choose_a_wav_file"), {-1, 0})) {
         wav_picker_failed_ = !file_request(wav_ticket_, {{"type", "browse_wav"}}, 10min);
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     if (wav_ticket_)
-        ImGui::TextDisabled("%s", localized("Waiting for a file…", "En attente d’un fichier…", "Esperando un archivo…"));
+        ImGui::TextDisabled("%s", tr("waiting_for_a_file"));
     else if (wav_picker_failed_)
-        ImGui::TextWrapped("%s", localized("Could not open the WAV file picker", "Impossible d’ouvrir le sélecteur WAV",
-                                          "No se pudo abrir el selector WAV"));
+        ImGui::TextWrapped("%s", tr("could_not_open_the_wav_file_picker"));
 
     ImGui::Separator();
-    ImGui::TextUnformatted(localized("Transcript", "Transcription", "Transcripción"));
+    ImGui::TextUnformatted(tr("transcript"));
     if (local_held_) {
-        ImGui::TextWrapped("%s", listening_ ? localized("Listening…", "Écoute…", "Escuchando…") :
-            localized("Starting microphone…", "Démarrage du micro…", "Iniciando micrófono…"));
+        ImGui::TextWrapped("%s", listening_ ? tr("provider_listening") :
+            tr("starting_microphone"));
     } else if (test_pending_) {
-        ImGui::TextUnformatted(localized("Transcribing…", "Transcription en cours…", "Transcribiendo…"));
+        ImGui::TextUnformatted(tr("test_transcribing"));
     } else if (!test_text_.empty()) {
         emphasized_text(test_text_.c_str());
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -1270,10 +1757,9 @@ void Provider::draw_tests() {
         ImGui::TextWrapped("%s", activity_status(test_status_, XSR_STAGE_NONE, test_source_));
     } else if (unavailable) {
         ImGui::TextWrapped("%s", broker_.ready() ?
-            localized("Choose an installed model to start a test.", "Choisis un modèle installé pour lancer un test.",
-                      "Elige un modelo instalado para iniciar una prueba.") : status_label(engine_status_));
+            tr("test_requires_model") : status_label(engine_status_));
     } else {
-        ImGui::TextDisabled("%s", localized("No result yet", "Aucun résultat pour le moment", "Aún no hay resultados"));
+        ImGui::TextDisabled("%s", tr("no_result_yet"));
     }
 }
 
@@ -1282,13 +1768,13 @@ void Provider::draw_activity() {
         ImGui::EndChild();
         return;
     }
-    const char* heading = localized("Recent requests", "Requêtes récentes", "Solicitudes recientes");
-    const auto subscribers_label = std::string(localized("Subscribers", "Abonnés", "Suscriptores")) +
+    const char* heading = tr("recent_requests");
+    const auto subscribers_label = std::string(tr("subscribers")) +
         " (" + std::to_string(subscribers_.size()) + ")";
     const float room = ImGui::GetContentRegionAvail().x;
     const float button_width = ImGui::CalcTextSize(subscribers_label.c_str()).x + 2 * ImGui::GetStyle().FramePadding.x;
     const float button_x = ImGui::GetCursorPosX() + room - button_width;
-    emphasized_text(heading);
+    window_.section_heading(heading);
     if (1.2f * ImGui::CalcTextSize(heading).x + button_width + 16 <= room) ImGui::SameLine(button_x);
     const auto button = subscribers_label + "###subscribers-menu";
     if (ImGui::Button(button.c_str())) ImGui::OpenPopup("subscriber-list");
@@ -1297,7 +1783,7 @@ void Provider::draw_activity() {
     ImGui::SetNextWindowSizeConstraints({std::min(222.f, room), 0}, {std::min(380.f, room), 295});
     if (ImGui::BeginPopup("subscriber-list")) {
         if (subscribers_.empty()) {
-            ImGui::TextDisabled("%s", localized("No subscribers", "Aucun abonné", "Sin suscriptores"));
+            ImGui::TextDisabled("%s", tr("no_subscribers"));
         }
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(1.f, std::min(344.f, room - 36)));
         for (const auto& item : subscribers_) ImGui::TextUnformatted(item.second.first.c_str());
@@ -1310,18 +1796,17 @@ void Provider::draw_activity() {
 
 void Provider::draw_recent_requests() {
     if (history_.empty())
-        ImGui::TextDisabled("%s", localized("No requests", "Aucune requête", "No hay solicitudes"));
+        ImGui::TextDisabled("%s", tr("no_requests"));
     for (const auto& row : history_) {
         ImGui::PushID(static_cast<int>(row.sequence));
         const bool visible = ImGui::BeginChild("request", {}, panel_flags);
         if (visible) {
             const char* source = row.client != local_client ? row.name.c_str() : test_source_label(row.source);
+            const auto phase = row.progress.phase();
             const char* state = activity_status(row.status, row.stage, row.source);
-            if (row.pending)
-                state = row.waiting_since ? localized("Transcribing", "Transcription en cours", "Transcribiendo") :
-                    localized("Capturing", "Capture en cours", "Grabando");
+            if (row.pending) state = activity_phase_label(phase);
             else if (row.status == XSR_OK)
-                state = localized("Transcribed", "Transcrit", "Transcrito");
+                state = tr("transcribed");
             constexpr float source_emphasis = 2;
             const float source_scale = (ImGui::GetFontSize() + source_emphasis) / ImGui::GetFontSize();
             const float source_width = ImGui::CalcTextSize(source).x * source_scale;
@@ -1332,26 +1817,34 @@ void Provider::draw_recent_requests() {
             emphasized_text(source, source_emphasis);
             ImGui::PopStyleColor();
             if (source_width + state_width + 24 <= room) ImGui::SameLine(state_x);
-            const auto state_color = row.pending ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) :
-                row.status == XSR_OK ? green_text : amber_text;
+            ImVec4 state_color = row.status == XSR_OK ? green_text : amber_text;
+            if (row.pending && phase == ActivityPhase::transcribing)
+                state_color = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            else if (row.pending && phase != ActivityPhase::capturing)
+                state_color = amber_text;
             ImGui::PushStyleColor(ImGuiCol_Text, state_color);
             ImGui::TextWrapped("%s", state);
             ImGui::PopStyleColor();
             if (!row.text.empty()) emphasized_text(row.text.c_str());
+            if (row.progress.capture_delay_ms) {
+                ImGui::TextDisabled(tr("first_audio_delay"), *row.progress.capture_delay_ms);
+            } else if (!row.pending && phase == ActivityPhase::released_before_audio) {
+                ImGui::TextDisabled("%s", activity_phase_label(phase));
+            }
             if (row.latency_ms) {
                 char duration[96]{};
                 std::snprintf(duration, sizeof(duration), latency_label(row.source), *row.latency_ms);
                 const char* warm = row.model_was_loaded ?
-                    localized("Model already loaded", "Modèle déjà chargé", "Modelo ya cargado") :
-                    localized("Model unloaded at start", "Modèle non chargé au départ", "Modelo sin cargar al inicio");
+                    tr("model_already_loaded") :
+                    tr("model_unloaded_at_start");
                 ImGui::TextWrapped("%s · %s", duration, warm);
             }
             if (!row.model.empty()) {
                 const char* vocab = row.vocabulary == XSR_VOCAB_APPLIED ?
-                    localized("Vocabulary applied", "Vocabulaire appliqué", "Vocabulario aplicado") :
+                    tr("vocabulary_applied") :
                     row.vocabulary == XSR_VOCAB_UNSUPPORTED ?
-                    localized("Vocabulary unsupported", "Vocabulaire non pris en charge", "Vocabulario no compatible") :
-                    localized("No vocabulary", "Sans vocabulaire", "Sin vocabulario");
+                    tr("vocabulary_unsupported") :
+                    tr("no_vocabulary");
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 ImGui::TextWrapped("%s %s · %s", model_label(row.model), row.quant.c_str(), vocab);
                 ImGui::PopStyleColor();
@@ -1364,39 +1857,57 @@ void Provider::draw_recent_requests() {
 
 std::vector<std::pair<std::string, std::string>> Provider::diagnostic_fields() const {
     const auto& profile = broker_.settings().profile;
-    const char* missing = localized("Unavailable", "Indisponible", "No disponible");
+    const char* missing = tr("unavailable");
     const auto engine_status = broker_.service_ready() ? XSR_OK :
         broker_.ready() ? XSR_ENGINE_RESTARTING : engine_status_;
     const char* model_state = missing;
     switch (broker_.model_state()) {
-    case XSR_MODEL_READY: model_state = localized("Loaded", "Chargé", "Cargado"); break;
-    case XSR_MODEL_LOADING: model_state = localized("Loading", "Chargement", "Cargando"); break;
-    case XSR_MODEL_UNLOADED: model_state = localized("Unloaded", "Déchargé", "Descargado"); break;
+    case XSR_MODEL_READY: model_state = tr("loaded"); break;
+    case XSR_MODEL_LOADING: model_state = tr("loading"); break;
+    case XSR_MODEL_UNLOADED: model_state = tr("unloaded"); break;
     }
 
     auto actual = broker_.model_state() == XSR_MODEL_READY ? broker_.actual_compute() : "";
     if (actual.empty()) actual = missing;
     else if (broker_.cpu_fallback())
-        actual += localized(" (CPU fallback)", " (repli CPU)", " (respaldo CPU)");
+        actual += tr("cpu_fallback_suffix");
 
     const auto& version = profile.moonshine_voice() ? moonshine_version_ :
         profile.whisper_cpp() ? whisper_version_ : engine_version_;
     const char* inference_engine = profile.moonshine_voice() ? "Moonshine Voice " :
         profile.whisper_cpp() ? "whisper.cpp " : "transcribe.cpp ";
+    std::string monitoring = missing;
+    if (last_monitoring_.is_object()) {
+        const auto mode = last_monitoring_.at("mode").get<std::string>();
+        if (mode == "capture_only") {
+            monitoring = tr("capture_only_monitoring_unavailable");
+        } else {
+            monitoring = mode == "low_latency" ? tr("low_latency") :
+                last_monitoring_.at("fallback").get<bool>() ? tr("standard_fallback") :
+                tr("standard");
+            const auto output_rate = last_monitoring_.at("output_rate").get<uint32_t>();
+            const auto frames = last_monitoring_.at("output_period_frames").get<uint32_t>();
+            char detail[112];
+            std::snprintf(detail, sizeof(detail), tr("monitoring_stream_details"),
+                last_monitoring_.at("stream_rate").get<uint32_t>(), output_rate, frames);
+            monitoring += detail;
+        }
+    }
     return {
         {"X-Speech Rekon", XSR_VERSION},
         {"X-Plane / SDK", std::to_string(xplane_version_) + " / " + std::to_string(sdk_version_)},
-        {localized("Engine", "Moteur", "Motor"), status_label(engine_status)},
-        {localized("Engine version", "Version du moteur", "Versión del motor"),
+        {tr("engine"), status_label(engine_status)},
+        {tr("engine_version"),
          version.empty() ? missing : inference_engine + version},
-        {localized("Model", "Modèle", "Modelo"),
+        {tr("model"),
          profile.available() ? std::string(model_label(profile.id)) + " " + profile.quant : missing},
-        {localized("Model state", "État du modèle", "Estado del modelo"), model_state},
-        {localized("Selected microphone", "Microphone sélectionné", "Micrófono seleccionado"), microphone_label()},
-        {localized("Requested compute", "Calcul demandé", "Cálculo solicitado"), profile.moonshine_voice() ? "CPU" : compute_label(draft_.compute)},
-        {localized("Effective compute", "Calcul effectif", "Cálculo efectivo"), std::move(actual)},
-        {localized("Settings storage", "Sauvegarde des réglages", "Guardado de ajustes"), writer_.failed() ?
-            localized("Write failed, retrying", "Échec, nouvelle tentative", "Error, reintentando") : "OK"},
+        {tr("model_state"), model_state},
+        {tr("selected_microphone"), microphone_label()},
+        {tr("last_microphone_monitoring"), std::move(monitoring)},
+        {tr("requested_compute"), profile.moonshine_voice() ? "CPU" : compute_label(draft_.compute)},
+        {tr("effective_compute"), std::move(actual)},
+        {tr("settings_storage"), writer_.failed() ?
+            tr("write_failed_retrying") : "OK"},
     };
 }
 
@@ -1411,12 +1922,12 @@ void Provider::draw_diagnostic() {
         catch (const std::exception&) { clipboard_result_ = false; }
     }
     ImGui::BeginDisabled(clipboard_copy_.valid());
-    if (ImGui::Button(localized("Copy diagnostics", "Copier le diagnostic", "Copiar el diagnóstico"))) {
+    if (ImGui::Button(ui_label("copy_diagnostics"))) {
         std::string report;
         for (const auto& [label, value] : fields) report += label + ": " + value + "\n";
         if (!incidents_.empty()) {
             report += "\n";
-            report += localized("Recent incidents", "Derniers incidents", "Incidentes recientes");
+            report += tr("recent_incidents");
             report += "\n";
             for (const auto& incident : incidents_) {
                 report += incident_time(incident.when) + " " + status_name(incident.status) + " " +
@@ -1435,18 +1946,17 @@ void Provider::draw_diagnostic() {
     ImGui::EndDisabled();
     if (clipboard_result_) {
         const char* feedback = *clipboard_result_ ?
-            localized("Copied", "Diagnostic copié", "Diagnóstico copiado") :
-            localized("Could not copy to the system clipboard", "Copie dans le presse-papiers impossible",
-                      "No se pudo copiar al portapapeles");
+            tr("copied") :
+            tr("could_not_copy_to_the_system_clipboard");
         ImGui::TextWrapped("%s", feedback);
     }
 
     if (ImGui::BeginChild("diagnostic-state", {}, panel_flags)) {
-        emphasized_text(localized("Current state", "État actuel", "Estado actual"));
+        window_.section_heading(tr("current_state"));
         const float label_width = std::min(174.f, ImGui::GetContentRegionAvail().x * 0.44f);
         if (ImGui::BeginTable("diagnostic-fields", 2, ImGuiTableFlags_NoPadOuterX)) {
-            ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, label_width);
-            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(ui_label("field"), ImGuiTableColumnFlags_WidthFixed, label_width);
+            ImGui::TableSetupColumn(ui_label("value"), ImGuiTableColumnFlags_WidthStretch);
             for (const auto& [label, value] : fields) {
                 ImGui::TableNextColumn();
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -1461,9 +1971,9 @@ void Provider::draw_diagnostic() {
     ImGui::EndChild();
 
     if (ImGui::BeginChild("diagnostic-incidents", {}, panel_flags)) {
-        emphasized_text(localized("Recent incidents", "Derniers incidents", "Incidentes recientes"));
+        window_.section_heading(tr("recent_incidents"));
         if (incidents_.empty()) {
-            ImGui::TextDisabled("%s", localized("No incidents", "Aucun incident", "Sin incidentes"));
+            ImGui::TextDisabled("%s", tr("no_incidents"));
         }
         for (const auto& incident : incidents_) {
             ImGui::TextDisabled("%s", incident_time(incident.when).c_str());
@@ -1492,8 +2002,9 @@ StatusDataRef status_datarefs[] = {
 PLUGIN_API int XPluginStart(char* name, char* signature, char* description) {
     std::strcpy(name, "X-Speech Rekon");
     std::strcpy(signature, XSR_PROVIDER_SIGNATURE);
-    std::strcpy(description, "Local push-to-talk transcription service");
     XPLMEnableFeature("XPLM_USE_NATIVE_PATHS", 1);
+    initialize_interface(false);
+    copy_plugin_description(description, "provider_description");
     for (auto& ref : status_datarefs) {
         ref.handle = XPLMRegisterDataAccessor(ref.name, xplmType_Int, 0, ref.read, nullptr,
             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,

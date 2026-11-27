@@ -70,6 +70,25 @@ void Broker::status(XsrRequest& out) const {
     settings_.profile.quant.copy(out.quantization, sizeof(out.quantization) - 1);
 }
 
+static uint32_t read_terms(const XsrRequest& request, std::vector<std::string>& terms) {
+    if (request.term_count > XSR_MAX_TERMS) return XSR_VOCABULARY_LIMIT;
+    if (request.term_count && !request.terms) return XSR_BAD_REQUEST;
+    std::set<std::string> seen;
+    size_t bytes = 0;
+    for (uint32_t i = 0; i < request.term_count; ++i) {
+        const auto term = request.terms[i];
+        if (term.bytes > XSR_MAX_TERM_BYTES || bytes + term.bytes > XSR_MAX_VOCABULARY_BYTES)
+            return XSR_VOCABULARY_LIMIT;
+        if (!term.data || !term.bytes || !valid_utf8({term.data, term.bytes})) return XSR_BAD_REQUEST;
+        std::string word(term.data, term.bytes);
+        if (seen.insert(word).second) {
+            bytes += term.bytes;
+            terms.push_back(std::move(word));
+        }
+    }
+    return XSR_OK;
+}
+
 void Broker::request(int sender, XsrRequest& out, Clock::time_point now) {
     if (out.struct_size < offsetof(XsrRequest, status) + sizeof(out.status)) return;
     if (out.version != XSR_ABI_VERSION || out.struct_size < sizeof(XsrRequest)) {
@@ -97,40 +116,22 @@ void Broker::request(int sender, XsrRequest& out, Clock::time_point now) {
         forget(sender, now);
         return;
     case XSR_SET_VOCABULARY: {
-        if (out.term_count > XSR_MAX_TERMS) {
-            out.status = XSR_VOCABULARY_LIMIT;
-            return;
-        }
-        if (out.term_count && !out.terms) {
+        std::vector<std::string> terms;
+        out.status = read_terms(out, terms);
+        if (out.status == XSR_OK) subscriber->second = std::move(terms);
+        return;
+    }
+    case XSR_PTT_BEGIN: {
+        out.session = 0;
+        const auto monitor_gain = out.struct_size >= sizeof(XsrPttBeginRequest) ?
+            reinterpret_cast<const XsrPttBeginRequest&>(out).monitor_gain_percent : settings_.monitor_gain_percent;
+        if (monitor_gain > XSR_MAX_MONITOR_GAIN_PERCENT) {
             out.status = XSR_BAD_REQUEST;
             return;
         }
-        std::set<std::string> seen;
-        std::vector<std::string> terms;
-        size_t bytes = 0;
-        for (uint32_t i = 0; i < out.term_count; ++i) {
-            const auto term = out.terms[i];
-            if (term.bytes > XSR_MAX_TERM_BYTES || bytes + term.bytes > XSR_MAX_VOCABULARY_BYTES) {
-                out.status = XSR_VOCABULARY_LIMIT;
-                return;
-            }
-            if (!term.data || !term.bytes || !valid_utf8({term.data, term.bytes})) {
-                out.status = XSR_BAD_REQUEST;
-                return;
-            }
-            std::string word(term.data, term.bytes);
-            if (seen.insert(word).second) {
-                bytes += term.bytes;
-                terms.push_back(std::move(word));
-            }
-        }
-        subscriber->second = std::move(terms);
+        out.status = begin(sender, {}, now, out.session, monitor_gain);
         return;
     }
-    case XSR_PTT_BEGIN:
-        out.session = 0;
-        out.status = begin(sender, {}, now, out.session);
-        return;
     case XSR_PTT_END:
         out.status = release(sender, out.session, now);
         return;
@@ -146,18 +147,22 @@ void Broker::request(int sender, XsrRequest& out, Clock::time_point now) {
     }
 }
 
-uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint64_t& session) {
+uint32_t Broker::begin(int client, std::string wav, Clock::time_point now, uint64_t& session,
+                       uint32_t monitor_gain_percent) {
     if (active_) return XSR_BUSY;
     if (!settings_.profile.available() || model_state_ == XSR_MODEL_MISSING) return XSR_MODEL_UNAVAILABLE;
     if (!service_ready()) return XSR_ENGINE_RESTARTING;
     const auto id = ++next_session_;
     const bool sample = !wav.empty();
+    const bool monitoring = !sample && settings_.sidetone && monitor_gain_percent != 0;
     std::string language;
     if (settings_.profile.parakeet_v2() || settings_.profile.whisper()) language = "en";
     else if (settings_.profile.nemotron()) language = settings_.language;
     Json request = {
         {"type", "begin"}, {"session", id}, {"generation", generation_},
         {"wav", std::move(wav)}, {"microphone", settings_.microphone},
+        {"sidetone", monitoring}, {"low_latency_monitoring", monitoring && settings_.low_latency_monitoring},
+        {"monitor_gain_percent", monitor_gain_percent},
         {"early", settings_.early && settings_.profile.streaming()},
         {"language", std::move(language)},
         {"terms", client == local_client ? std::vector<std::string>{} : subscribers_.at(client)}
@@ -179,13 +184,13 @@ uint32_t Broker::release(int client, uint64_t session, Clock::time_point now) {
         return XSR_ENGINE_RESTARTING;
     }
     active_->released = true;
-    active_->deadline = now + (model_state_ == XSR_MODEL_READY ? 10s : 20s);
+    active_->deadline = now + (client == microphone_client ? 2s : model_state_ == XSR_MODEL_READY ? 10s : 20s);
     return XSR_OK;
 }
 
 uint32_t Broker::begin_local(std::string wav, Clock::time_point now, uint64_t& session) {
     tick(now);
-    return begin(local_client, std::move(wav), now, session);
+    return begin(local_client, std::move(wav), now, session, settings_.monitor_gain_percent);
 }
 
 uint32_t Broker::end_local(uint64_t session, Clock::time_point now) {
@@ -195,6 +200,28 @@ uint32_t Broker::end_local(uint64_t session, Clock::time_point now) {
 
 void Broker::cancel_local(Clock::time_point now) {
     forget(local_client, now);
+}
+
+uint32_t Broker::begin_microphone_test(Clock::time_point now, uint64_t& session) {
+    tick(now);
+    session = 0;
+    if (active_) return XSR_BUSY;
+    if (!service_ready()) return XSR_ENGINE_RESTARTING;
+    const auto id = ++next_session_;
+    if (!send_({{"type", "begin"}, {"session", id}, {"microphone_test", true},
+                {"microphone", settings_.microphone}})) return XSR_ENGINE_RESTARTING;
+    session = id;
+    active_ = Session{microphone_client, id, now, now + 2s, {}};
+    return XSR_OK;
+}
+
+void Broker::cancel_microphone_test(Clock::time_point now) {
+    if (active_ && active_->client == microphone_client) abort_session(XSR_CANCELLED, XSR_STAGE_NONE, now);
+}
+
+uint32_t Broker::end_microphone_test(uint64_t session, Clock::time_point now) {
+    tick(now);
+    return release(microphone_client, session, now);
 }
 
 void Broker::forget(int client, Clock::time_point now) {
@@ -224,12 +251,16 @@ void Broker::finish(uint32_t status_code, uint32_t stage, Json result, Clock::ti
     if (!active_) return;
     auto session = std::move(*active_);
     active_.reset();
-    last_use_ = now;
+    if (session.client != microphone_client) last_use_ = now;
     const auto settled_generation = generation_;
     if (pending_) {
         auto updated = std::move(*pending_);
         pending_.reset();
         set_settings(std::move(updated), now);
+    }
+    if (session.client == microphone_client) {
+        deliver_({session.client, XSR_RESULT, status_code, session.id, stage, std::move(result)});
+        return;
     }
     if (ready_ && settled_generation == generation_ && settings_.unload == UnloadPolicy::after_use) {
         if (draining_session_) unload_retry_ = now;
@@ -271,13 +302,14 @@ void Broker::accept(const Json& event, Clock::time_point now) {
         if (!active_ || session != active_->id) return;
         const auto code = event.at("status").get<uint32_t>();
         if (code > XSR_VOCABULARY_LIMIT) throw std::runtime_error("Invalid engine result status");
-        const bool revert = code == XSR_MODEL_UNAVAILABLE && !pending_;
+        const bool revert = active_->client != microphone_client && code == XSR_MODEL_UNAVAILABLE && !pending_;
         finish(code, XSR_STAGE_NONE, code == XSR_OK ? event : Json::object(), now);
         if (revert) recover_profile(now);
     } else if (type == "capture" && active_ && !active_->released && !active_->captured &&
                event.value("session", uint64_t(0)) == active_->id) {
         active_->captured = true;
-        active_->deadline = active_->accepted + 30s;
+        active_->deadline = active_->client == microphone_client ? now + std::chrono::seconds(microphone_test_seconds + 2) :
+            active_->accepted + 30s;
         deliver_({active_->client, XSR_CAPTURE_STARTED, XSR_OK, active_->id});
     }
 }

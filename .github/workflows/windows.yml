@@ -136,6 +136,9 @@ jobs:
           .\cmake\package-moonshine.ps1 -Stage $stage
           $extracted = Join-Path $env:RUNNER_TEMP 'Vérification Moonshine'
           Expand-Archive -LiteralPath dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip -DestinationPath $extracted
+          $plugin = Join-Path $extracted 'X-Speech-Rekon'
+          cmake "-DPLUGIN_DIR=$plugin" -P cmake/check-locales.cmake
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $engine = Join-Path $extracted 'X-Speech-Rekon/bin/xsr-engine.exe'
           $check = Join-Path $extracted 'tools/xsr-check.exe'
           $wav = Join-Path $extracted 'X-Speech-Rekon/test-en.wav'

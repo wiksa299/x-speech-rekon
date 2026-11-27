@@ -32,6 +32,11 @@ add_subdirectory("${WHISPER_SOURCE}" upstream EXCLUDE_FROM_ALL)
 if(XSR_VULKAN)
     find_package(SPIRV-Headers CONFIG REQUIRED HINTS "$ENV{VULKAN_SDK}")
     target_link_libraries(ggml-vulkan PRIVATE SPIRV-Headers::SPIRV-Headers)
+    if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # LLVM-MinGW spends disproportionate time optimizing this translation unit at -O3.
+        set_property(SOURCE "${WHISPER_SOURCE}/ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+            TARGET_DIRECTORY ggml-vulkan APPEND PROPERTY COMPILE_OPTIONS "$<$<CONFIG:Release>:-O1>")
+    endif()
 endif()
 
 find_package(Threads REQUIRED)

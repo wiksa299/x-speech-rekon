@@ -1,4 +1,5 @@
 #include "core.hpp"
+#include "whisper_repeat.hpp"
 
 #include <ggml-backend.h>
 #include <grammar-parser.h>
@@ -151,16 +152,42 @@ Json decode(whisper_context* model, const std::vector<float>& samples, const std
     }
 
     const auto start = Clock::now();
-    if (whisper_full(model, params, samples.data(), static_cast<int>(samples.size())) != 0)
+    const auto run = [&](whisper_full_params options) {
+        std::string text;
+        if (whisper_full(model, options, samples.data(), static_cast<int>(samples.size())) != 0)
+            return std::optional<std::string>{};
+        for (int i = 0; i < whisper_full_n_segments(model); ++i) text += whisper_full_get_segment_text(model, i);
+        return std::optional<std::string>{std::move(text)};
+    };
+    auto decoded = run(params);
+    if (!decoded)
         return {{"status", XSR_ENGINE_ERROR}};
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
-    std::string text;
-    for (int i = 0; i < whisper_full_n_segments(model); ++i) text += whisper_full_get_segment_text(model, i);
+    auto& text = *decoded;
     if (text.find_first_not_of(" \r\t\n") == std::string::npos) return {{"status", XSR_NO_SPEECH}};
     if (text.size() > max_result_size) return {{"status", XSR_OUTPUT_TRUNCATED}};
     if (!valid_utf8(text)) return {{"status", XSR_ENGINE_ERROR}};
+    uint32_t vocabulary = terms.empty() ? XSR_VOCAB_NONE : rules.empty() ? XSR_VOCAB_UNSUPPORTED : XSR_VOCAB_APPLIED;
+    const auto prefix_end = whisper_repeated_prefix_end(text);
+    const auto expected = prefix_end ? std::optional{whisper_words(std::string_view(text).substr(0, *prefix_end))} :
+        whisper_without_repeated_tail(text);
+    if (expected) {
+        params.grammar_rules = nullptr;
+        params.n_grammar_rules = 0;
+        params.prompt_tokens = nullptr;
+        params.prompt_n_tokens = 0;
+        if (vocabulary != XSR_VOCAB_APPLIED) {
+            params.strategy = WHISPER_SAMPLING_BEAM_SEARCH;
+            params.beam_search.beam_size = 3;
+        }
+        auto retry = run(params);
+        if (retry && retry->size() <= max_result_size && valid_utf8(*retry) && whisper_words(*retry) == *expected) {
+            text = std::move(*retry);
+            if (vocabulary == XSR_VOCAB_APPLIED) vocabulary = XSR_VOCAB_NONE;
+        } else if (prefix_end) text.resize(*prefix_end);
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
     return {{"status", XSR_OK}, {"text", std::move(text)}, {"language", "en"},
-            {"vocabulary", terms.empty() ? XSR_VOCAB_NONE : rules.empty() ? XSR_VOCAB_UNSUPPORTED : XSR_VOCAB_APPLIED},
+            {"vocabulary", vocabulary},
             {"capture_ms", samples.size() * 1000 / sample_rate}, {"compute_ms", elapsed.count()}};
 }
 

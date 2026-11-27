@@ -54,6 +54,8 @@ Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
 $check = Join-Path $env:RUNNER_TEMP ('Essai vocal été ' + $env:GITHUB_RUN_ID)
 Expand-Archive -LiteralPath $zip -DestinationPath $check -Force
 $plugin = Join-Path $check 'X-Speech-Rekon'
+cmake "-DPLUGIN_DIR=$plugin" -P "$PSScriptRoot/check-locales.cmake"
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $models = Join-Path $env:RUNNER_TEMP 'xsr-models'
 $engine = Join-Path $plugin 'bin/xsr-engine.exe'
 $verifier = Join-Path $check 'tools/xsr-check.exe'

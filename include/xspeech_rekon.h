@@ -18,6 +18,8 @@ extern "C" {
 #define XSR_MAX_TERM_BYTES 96u
 #define XSR_MAX_VOCABULARY_BYTES 16384u
 #define XSR_MAX_TEXT_BYTES 8192u
+#define XSR_DEFAULT_MONITOR_GAIN_PERCENT 10u
+#define XSR_MAX_MONITOR_GAIN_PERCENT 100u
 
 enum XsrOperation {
     XSR_SUBSCRIBE = 1, XSR_UNSUBSCRIBE, XSR_GET_STATUS, XSR_SET_VOCABULARY,
@@ -61,6 +63,17 @@ typedef struct XsrRequest {
     char model_id[64];
     char quantization[16];
 } XsrRequest;
+
+/* Optional PTT_BEGIN payload. Pass &request with request.struct_size set to
+ * sizeof(XsrPttBeginRequest). A v1 provider without this extension ignores
+ * the gain field. The provider's monitoring preference must be enabled.
+ * The value overrides the provider's monitoring volume for this session only.
+ * It affects playback only. Zero mutes monitoring. The base XsrRequest uses
+ * the provider's configured volume. */
+typedef struct XsrPttBeginRequest {
+    XsrRequest request;
+    uint32_t monitor_gain_percent;
+} XsrPttBeginRequest;
 
 /* Callback-scoped event. Copy the data needed after the callback returns.
  * Text is present only for a successful terminal result. */

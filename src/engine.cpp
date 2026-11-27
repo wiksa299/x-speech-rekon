@@ -1,11 +1,13 @@
 #include "audio.hpp"
 #include "desktop.hpp"
 #include "models.hpp"
+#include "whisper_repeat.hpp"
 #ifdef XSR_MOONSHINE
 #include "moonshine.hpp"
 #endif
 
 #include <transcribe.h>
+#include <transcribe/whisper.h>
 
 #include <algorithm>
 #include <condition_variable>
@@ -41,7 +43,8 @@ public:
             vulkan_devices_.emplace(id, ComputeDevice{device, label, info.description ? info.description : ""});
             devices.push_back({{"id", id}, {"label", label}});
         }
-        Json hello = {{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()}, {"devices", std::move(devices)}};
+        Json hello = {{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()},
+                      {"devices", std::move(devices)}, {"microphone_test", true}, {"low_latency_monitoring", true}};
         std::error_code file_error;
         if (fs::is_regular_file(whisper_path_, file_error)) hello["whisper_version"] = XSR_WHISPER_VERSION;
 #ifdef XSR_MOONSHINE
@@ -63,6 +66,7 @@ public:
             std::lock_guard lock(mutex_);
             stopping_ = true;
             download_cancelled_ = true;
+            microphone_playing_ = 0;
             if (active_) active_->cancelled = true;
         }
         available_.notify_all();
@@ -74,7 +78,7 @@ public:
 
 private:
     struct Control {
-        explicit Control(uint64_t session) : id(session) {}
+        explicit Control(uint64_t session, bool microphone_test) : id(session), recording(microphone_test) {}
         ~Control() { stop_capture(); }
         void stop_capture() {
             released = true;
@@ -93,7 +97,10 @@ private:
         if (type == "begin") {
             const auto session = message.at("session").get<uint64_t>();
             if (active_) return {{"type", "result"}, {"session", session}, {"status", XSR_BUSY}};
-            active_ = std::make_shared<Control>(session);
+            const bool microphone_test = message.value("microphone_test", false);
+            microphone_playing_ = 0;
+            if (microphone_test) microphone_take_ = session;
+            active_ = std::make_shared<Control>(session, microphone_test);
             if (message.value("wav", "").empty()) start_capture(message, *active_);
             inference_.push_back({std::move(message), active_});
         } else if (type == "end" || type == "cancel") {
@@ -101,6 +108,16 @@ private:
                 if (type == "end") active_->released = true;
                 else active_->cancelled = true;
             }
+        } else if (type == "mic_play") {
+            const auto session = message.at("session").get<uint64_t>();
+            if (!session || active_ || microphone_playing_ || microphone_take_ != session || inference_.size() >= 16)
+                return {{"type", "mic_playback"}, {"session", session}, {"ok", false}};
+            microphone_playing_ = session;
+            inference_.push_back({std::move(message), {}});
+        } else if (type == "mic_stop" || type == "mic_clear") {
+            const auto session = message.at("session").get<uint64_t>();
+            if (microphone_playing_ == session) microphone_playing_ = 0;
+            if (type == "mic_clear" && microphone_take_ == session) microphone_take_ = 0;
         } else if (type == "cancel_download") {
             download_cancelled_ = true;
         } else if (type == "download") {
@@ -217,8 +234,14 @@ private:
             Job next;
             {
                 std::unique_lock lock(mutex_);
-                available_.wait(lock, [&] { return stopping_ || !inference_.empty(); });
+                available_.wait(lock, [&] { return stopping_ || !inference_.empty() ||
+                    (stored_take_ && stored_take_ != microphone_take_); });
                 if (stopping_) return;
+                if (stored_take_ && stored_take_ != microphone_take_) {
+                    std::vector<float>().swap(take_samples_);
+                    stored_take_ = 0;
+                }
+                if (inference_.empty()) continue;
                 next = std::move(inference_.front());
                 inference_.pop_front();
             }
@@ -228,6 +251,7 @@ private:
                 auto sha256 = next.request.value("sha256", "");
                 auto compute = next.request.value("compute", "cpu");
                 auto model = next.request.value("model", "");
+                if (!Profile{model, {}, {}, {}, {}}.supported()) path.clear();
                 if (path != path_ || sha256 != sha256_ || compute != requested_compute_ || model != model_id_) unload();
                 path_ = std::move(path);
                 sha256_ = std::move(sha256);
@@ -243,8 +267,16 @@ private:
                 state(path_.empty() ? XSR_MODEL_MISSING : XSR_MODEL_UNLOADED);
             } else if (type == "microphones") {
                 publish({{"type", "microphones"}, {"items", microphone_list()}});
+            } else if (type == "mic_play") {
+                const auto session = next.request.at("session").get<uint64_t>();
+                const bool ok = microphone_playing_ != session ||
+                    (stored_take_ == session && play_microphone_take(take_samples_, session, microphone_playing_));
+                auto expected = session;
+                microphone_playing_.compare_exchange_strong(expected, 0);
+                publish({{"type", "mic_playback"}, {"session", session}, {"ok", ok}});
             } else if (type == "begin") {
-                Json response = transcribe(next.request, *next.control);
+                Json response = next.control->recording.microphone_test ? measure_microphone(*next.control) :
+                    transcribe(next.request, *next.control);
                 next.control->stop_capture();
                 {
                     std::lock_guard lock(mutex_);
@@ -317,13 +349,47 @@ private:
         }
     }
 
+    Json measure_microphone(Control& control) {
+        auto& recording = control.recording;
+        while (!recording.closed && !control.cancelled) std::this_thread::sleep_for(5ms);
+        control.stop_capture();
+        const auto count = recording.count.load(std::memory_order_acquire);
+        uint32_t status = recording.error;
+        if (control.cancelled) status = XSR_CANCELLED;
+        else if (status == XSR_OK && !count) status = XSR_NO_AUDIO;
+        Json result = {{"status", status}, {"microphone_test", true}};
+        if (status != XSR_OK) return result;
+        result.update(microphone_measurement(recording.samples.data(), count));
+        if (microphone_take_ == control.id) {
+            recording.samples.resize(count);
+            take_samples_ = std::move(recording.samples);
+            stored_take_ = control.id;
+        }
+        return result;
+    }
+
     void start_capture(const Json& request, Control& control) {
         const auto microphone = request.value("microphone", "");
         const auto injection = fs::u8path(request.value("injection", ""));
-        control.capture = std::thread([this, &control, microphone, injection] {
-            record(control.recording, microphone, injection, control.released, control.cancelled,
-                [&](float level, bool started) {
-                    publish({{"type", started ? "capture" : "level"}, {"session", control.id}, {"level", level}});
+        const auto gain_percent = request.value("sidetone", false) ?
+            std::min(request.value("monitor_gain_percent", XSR_DEFAULT_MONITOR_GAIN_PERCENT),
+                     XSR_MAX_MONITOR_GAIN_PERCENT) : 0u;
+        const auto monitor_gain = static_cast<float>(gain_percent) / 100.0f;
+        const bool low_latency = request.value("low_latency_monitoring", false);
+        control.capture = std::thread([this, &control, microphone, injection, monitor_gain, low_latency] {
+            record(control.recording, microphone, injection, monitor_gain, low_latency, control.released, control.cancelled,
+                [&](float level, bool started, size_t count, const std::string& name, const CaptureMonitoring& monitoring) {
+                    Json event = {{"type", started ? "capture" : "level"}, {"session", control.id}, {"level", level}};
+                    if (control.recording.microphone_test) {
+                        event["capture_ms"] = count * 1000 / sample_rate;
+                        if (started) event["microphone"] = name;
+                    }
+                    if (started && monitoring.mode) {
+                        event["monitoring"] = {{"mode", monitoring.mode}, {"fallback", monitoring.fallback},
+                            {"stream_rate", monitoring.stream_rate}, {"output_rate", monitoring.output_rate},
+                            {"output_period_frames", monitoring.output_period_frames}};
+                    }
+                    publish(event);
                 });
         });
     }
@@ -345,6 +411,9 @@ private:
     bool download_active_ = false;
     std::shared_ptr<Control> active_;
     std::atomic<bool> stopping_{false}, download_cancelled_{false};
+    std::atomic<uint64_t> microphone_take_{0}, microphone_playing_{0};
+    std::vector<float> take_samples_;
+    uint64_t stored_take_ = 0;
     struct ComputeDevice {
         transcribe_device_t handle;
         std::string label;
@@ -516,9 +585,40 @@ Json Engine::transcribe(const Json& request, Control& control) {
     if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XSR_NO_SPEECH);
     if (text.size() > max_result_size) return error(XSR_OUTPUT_TRUNCATED);
     if (!valid_utf8(text)) return error(XSR_ENGINE_ERROR);
-    const auto* language = transcribe_detected_language(session.get());
+    const char* detected = transcribe_detected_language(session.get());
+    const std::string language = detected && *detected ? detected : params.language ? params.language : "";
+    if (!streaming && model_id_ == whisper_transcribe_id) {
+        const auto prefix_end = whisper_repeated_prefix_end(text);
+        const auto expected = prefix_end ? std::optional{whisper_words(std::string_view(text).substr(0, *prefix_end))} :
+            whisper_without_repeated_tail(text);
+        if (expected) {
+            auto retry_params = params;
+            retry_params.vocabulary = nullptr;
+            retry_params.n_vocabulary = 0;
+            transcribe_whisper_run_ext options{};
+            transcribe_whisper_run_ext_init(&options);
+            options.temperature = vocabulary == XSR_VOCAB_APPLIED ? 0.f : 0.2f;
+            options.temperature_inc = 0.f;
+            retry_params.family = &options.ext;
+            if (control.cancelled) return error(XSR_CANCELLED);
+            const auto retry_status = timed([&] {
+                return transcribe_run(session.get(), recording.samples.data(), int(count), &retry_params);
+            });
+            if (control.cancelled) return error(XSR_CANCELLED);
+            bool retry_confirmed = false;
+            if (retry_status == TRANSCRIBE_OK && !transcribe_was_truncated(session.get())) {
+                std::string retry = transcribe_full_text(session.get());
+                if (retry.size() <= max_result_size && valid_utf8(retry) && whisper_words(retry) == *expected) {
+                    text = std::move(retry);
+                    retry_confirmed = true;
+                    if (vocabulary == XSR_VOCAB_APPLIED) vocabulary = XSR_VOCAB_NONE;
+                }
+            }
+            if (!retry_confirmed && prefix_end) text.resize(*prefix_end);
+        }
+    }
     return {{"status", XSR_OK}, {"text", std::move(text)},
-            {"language", language && *language ? language : params.language ? params.language : ""},
+            {"language", language},
             {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
             {"compute_ms", std::chrono::duration_cast<std::chrono::milliseconds>(compute_time).count()}};
 }

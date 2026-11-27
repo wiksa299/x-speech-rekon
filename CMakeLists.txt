@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 project(XSpeechRekon VERSION 0.1.0 LANGUAGES C CXX)
+set(XSR_RELEASE_VERSION "${PROJECT_VERSION}-beta.1")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,10 +41,22 @@ else()
     endforeach()
 endif()
 
-FetchContent_Declare(transcribe URL https://codeload.github.com/handy-computer/transcribe.cpp/tar.gz/cfa237c2551a4b2d3a56ff8fe5461e3c67c51772)
+FetchContent_Declare(transcribe
+    URL https://codeload.github.com/handy-computer/transcribe.cpp/tar.gz/cfa237c2551a4b2d3a56ff8fe5461e3c67c51772
+    SOURCE_SUBDIR xsr-populate-only)
 FetchContent_Declare(json URL https://codeload.github.com/nlohmann/json/tar.gz/55f93686c01528224f448c19128836e7df245f72)
 FetchContent_Declare(miniaudio URL https://codeload.github.com/mackron/miniaudio/tar.gz/877ea4a7c2601c7b0f2a44e83dfac42e6470fea6 SOURCE_SUBDIR xsr-header-only)
 FetchContent_MakeAvailable(transcribe json miniaudio)
+# Configure the library after pruning, even when a build reuses populated sources.
+# Keep a caller-supplied checkout intact.
+if(FETCHCONTENT_SOURCE_DIR_TRANSCRIBE)
+    set(transcribe_local "${CMAKE_CURRENT_BINARY_DIR}/transcribe-local-src")
+    file(COPY "${transcribe_SOURCE_DIR}/" DESTINATION "${transcribe_local}" PATTERN ".git" EXCLUDE PATTERN "build" EXCLUDE)
+    set(transcribe_SOURCE_DIR "${transcribe_local}")
+endif()
+include(cmake/PruneTranscribe.cmake)
+xsr_prune_transcribe("${transcribe_SOURCE_DIR}")
+add_subdirectory("${transcribe_SOURCE_DIR}" "${transcribe_BINARY_DIR}")
 # The pinned upstream build uses CMAKE_SOURCE_DIR for this public include.
 target_include_directories(transcribe PUBLIC "${transcribe_SOURCE_DIR}/include")
 if(XSR_VULKAN)
@@ -65,6 +78,7 @@ target_link_libraries(xsr-engine PRIVATE xsr_core transcribe ggml ${CMAKE_DL_LIB
 if(WIN32)
     target_link_libraries(xsr-engine PRIVATE winhttp bcrypt)
     set_target_properties(xsr-engine PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    set_target_properties(transcribe PROPERTIES PREFIX "")
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl)
@@ -77,17 +91,28 @@ include(cmake/Whisper.cmake)
 
 add_executable(xsr-check src/check.cpp)
 target_link_libraries(xsr-check PRIVATE xsr_core)
+if(MINGW)
+    target_link_options(xsr-check PRIVATE -municode)
+endif()
 
 if(XSR_BUILD_PLUGINS)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/assets/catalog.json")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/assets/catalog.json" xsr_model_catalog)
+    configure_file(cmake/model_catalog.hpp.in generated/model_catalog.hpp @ONLY)
     FetchContent_Declare(xpsdk URL https://codeload.github.com/X-Plane/xpsdk/tar.gz/ed88aed734106466436ba9efd9a87332fbd9808e)
     FetchContent_Declare(imgui URL https://codeload.github.com/ocornut/imgui/tar.gz/f5befd2d29e66809cd1110a152e375a7f1981f06)
     FetchContent_MakeAvailable(xpsdk imgui)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS assets/locales/en.json)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/assets/locales/en.json" xsr_english_catalog)
+    configure_file(cmake/english_catalog.hpp.in generated/english_catalog.hpp @ONLY)
     add_library(xsr_imgui STATIC
         "${imgui_SOURCE_DIR}/imgui.cpp"
         "${imgui_SOURCE_DIR}/imgui_draw.cpp"
         "${imgui_SOURCE_DIR}/imgui_tables.cpp"
         "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
-        src/window.cpp)
+        src/window.cpp src/localization.cpp)
+    target_link_libraries(xsr_imgui PRIVATE nlohmann_json::nlohmann_json)
+    target_include_directories(xsr_imgui PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_include_directories(xsr_imgui PUBLIC src
         "${imgui_SOURCE_DIR}" "${xpsdk_SOURCE_DIR}/CHeaders/XPLM")
     target_compile_definitions(xsr_imgui PUBLIC
@@ -111,7 +136,8 @@ if(XSR_BUILD_PLUGINS)
             LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/plugins/${plugin}"
             RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/plugins/${plugin}")
     endforeach()
-    target_compile_definitions(xsr-provider PRIVATE XSR_VERSION="${PROJECT_VERSION}")
+    target_compile_definitions(xsr-provider PRIVATE XSR_VERSION="${XSR_RELEASE_VERSION}")
+    target_include_directories(xsr-provider PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     if(WIN32)
         if(TARGET xsr-moonshine)
             # The experimental SDK build can be staged locally for integration tests.
@@ -135,9 +161,10 @@ if(XSR_BUILD_PLUGINS)
             install(FILES "$<TARGET_FILE:ggml-vulkan>" DESTINATION X-Speech-Rekon/bin COMPONENT xsr)
         endif()
         install(TARGETS xsr-check RUNTIME DESTINATION tools COMPONENT xsr)
+        install(DIRECTORY assets/locales DESTINATION X-Speech-Rekon COMPONENT xsr)
         install(FILES assets/catalog.json assets/test-en.wav assets/test-fr.wav assets/test-es.wav assets/NotoSans-Regular.ttf
             DESTINATION X-Speech-Rekon COMPONENT xsr)
-        install(FILES include/xspeech_rekon.h LICENSE README.md
+        install(FILES include/xspeech_rekon.h LICENSE README.md CHANGELOG.md
             DESTINATION . COMPONENT xsr)
         install(FILES "${transcribe_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME transcribe.cpp.txt COMPONENT xsr)
         install(FILES "${transcribe_SOURCE_DIR}/ggml/LICENSE" DESTINATION licenses RENAME ggml.txt COMPONENT xsr)
@@ -156,14 +183,21 @@ if(BUILD_TESTING)
     add_test(NAME core COMMAND xsr-tests)
     add_test(NAME engine-process COMMAND xsr-check --engine $<TARGET_FILE:xsr-engine> --probe)
     set_tests_properties(engine-process PROPERTIES TIMEOUT 20)
+    add_test(NAME microphone-test COMMAND xsr-check --engine $<TARGET_FILE:xsr-engine>
+        --probe-microphone "${PROJECT_SOURCE_DIR}/assets/test-en.wav")
+    set_tests_properties(microphone-test PROPERTIES TIMEOUT 20)
     if(XSR_BUILD_PLUGINS AND UNIX AND NOT APPLE)
-        add_executable(xsr-native-host tests/native_host.cpp)
+        add_executable(xsr-native-host tests/native_host.cpp tests/locale_engine.cpp)
         set_target_properties(xsr-native-host PROPERTIES ENABLE_EXPORTS ON CXX_VISIBILITY_PRESET default)
         target_link_libraries(xsr-native-host PRIVATE xsr_core xsr_imgui ${CMAKE_DL_LIBS})
+        add_test(NAME resize-grips COMMAND xsr-native-host --resize-grips)
         add_test(NAME native-sdk-host COMMAND xsr-native-host
             $<TARGET_FILE:xsr-provider> $<TARGET_FILE:xsr-diagnostic>
             $<TARGET_FILE:xsr-engine> "${PROJECT_SOURCE_DIR}/assets/catalog.json")
-        set_tests_properties(native-sdk-host PROPERTIES TIMEOUT 20)
+        add_test(NAME locale-ptt COMMAND xsr-native-host
+            $<TARGET_FILE:xsr-provider> $<TARGET_FILE:xsr-diagnostic>
+            --locale-ptt "${PROJECT_SOURCE_DIR}/assets/catalog.json")
+        set_tests_properties(native-sdk-host locale-ptt PROPERTIES TIMEOUT 20)
     endif()
     if(XSR_TEST_MODELS)
         add_test(NAME real-models COMMAND xsr-check --engine $<TARGET_FILE:xsr-engine>

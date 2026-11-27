@@ -41,6 +41,40 @@ public:
         throw std::runtime_error("timeout waiting for " + std::string(type));
     }
 
+    void probe_microphone(const fs::path& wav) {
+        const auto deadline = Clock::now() + 4s;
+        while (!broker_.service_ready() && Clock::now() < deadline) {
+            poll();
+            std::this_thread::sleep_for(5ms);
+        }
+        injection_ = wav.u8string();
+        uint64_t session = 0;
+        check_status(broker_.begin_microphone_test(Clock::now(), session));
+        while (Clock::now() < deadline) {
+            poll();
+            const auto result = std::find_if(deliveries_.begin(), deliveries_.end(), [&](const Delivery& value) {
+                return value.session == session && value.kind == XSR_RESULT;
+            });
+            if (result != deliveries_.end()) {
+                check_status(result->status);
+                if (result->client != microphone_client || !result->result.value("microphone_test", false) ||
+                    result->result.at("capture_ms").get<unsigned>() == 0 ||
+                    result->result.at("peak_dbfs").get<float>() <= -60 || broker_.model_state() != XSR_MODEL_MISSING)
+                    throw std::runtime_error("unexpected microphone test result");
+                const auto metrics = result->result.dump();
+                send({{"type", "mic_clear"}, {"session", session}});
+                send({{"type", "mic_play"}, {"session", session}});
+                const auto playback = message("mic_playback", 2s);
+                if (playback.at("session") != session || playback.value("ok", true))
+                    throw std::runtime_error("cleared recording can still be played");
+                std::cout << "Microphone test OK without a model · " << metrics << '\n';
+                return;
+            }
+            std::this_thread::sleep_for(5ms);
+        }
+        throw std::runtime_error("timeout waiting for microphone test");
+    }
+
     void fetch(const fs::path& folder, const Json& catalog, const std::string& selection) {
         for (const auto& entry : catalog) {
             if (!matches(entry, selection)) continue;
@@ -259,6 +293,10 @@ int run(const std::vector<fs::path>& args) {
         if (std::find(args.begin(), args.end(), fs::path("--probe")) != args.end()) {
             check.start();
             std::cout << "Engine protocol 1 OK\n";
+            return 0;
+        }
+        if (const auto wav = option("--probe-microphone"); !wav.empty()) {
+            check.probe_microphone(wav);
             return 0;
         }
         std::ifstream input(option("--catalog"));

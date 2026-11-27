@@ -1,17 +1,19 @@
 # X‑Speech Rekon
 
-Add local push-to-talk speech recognition to your X-Plane plugin through a native C API. X‑Speech Rekon is a shared speech recognition service for X‑Plane 12.4.4 or later. It runs Moonshine Streaming, Parakeet v2 or v3, Nemotron 3.5 Streaming, and Whisper Small.en on the user's machine. The Windows x64 preview runs on the CPU by default and offers Vulkan on compatible GPUs.
+Add local push-to-talk speech recognition to your X-Plane plugin through a native C API. X‑Speech Rekon is a shared speech recognition service for X‑Plane 12.4.4 or later. It runs Moonshine Streaming, Parakeet v2 or v3, Nemotron 3.5 Streaming, and Whisper Small.en on the user's machine. The Windows x64 beta runs on the CPU by default and offers Vulkan on compatible GPUs.
 
-[Install on Windows](#install-and-test-on-windows) · [Integrate with your plugin](#integrate-with-your-x-plane-plugin) · [Build from source](#build-and-test-without-the-simulator)
+[Install on Windows](#install-and-test-on-windows) · [Integrate with your plugin](#integrate-with-your-x-plane-plugin) · [Build from source](#build-and-test-without-the-simulator) · [Release notes](CHANGELOG.md)
 
 ## Install and test on Windows
 
-Download `X-Speech-Rekon-Windows-x86-64.zip` and its SHA‑256 file from **Artifacts** on the corresponding [Windows preview build](https://github.com/wiksa299/x-speech-rekon/actions/workflows/windows.yml).
+Download `X-Speech-Rekon-Windows-x86-64.zip` and its SHA‑256 file from **Artifacts** on the corresponding [Windows build](https://github.com/wiksa299/x-speech-rekon/actions/workflows/windows.yml). Choose a model to download after installation, or point Rekon to the models you already have.
 
 1. Close X‑Plane. When upgrading from an earlier preview, move its plugin folders out of `Resources/plugins` and keep your GGUF files. Extract `X-Speech-Rekon` into `Resources/plugins`. Extract `X-Speech-Rekon-Diagnostic` alongside it to try the reference client.
-2. Start X‑Plane and open **Plugins → X-Speech Rekon → Settings**. Use **Models folder** to select where you kept your GGUF files, or download Parakeet v3 Q8_0. Select **Use this model** when it appears as available.
+2. Start X‑Plane and open **Plugins → X-Speech Rekon → Settings**. Use **Models folder** to select where you kept your models, or select a model such as Parakeet v3 or Whisper Small.en, choose **Q8_0**, and click **Download**. Select **Use this model** when it appears as available.
 3. Open **Test**. Try **Test the built-in recording** or **Choose a WAV file…** with a recording of up to 30 seconds. Use **Hold to talk** to test your microphone. Results appear under **Transcript**.
 4. To test inter-plugin PTT with the diagnostic client, bind `xspeech_rekon/diagnostic/ptt` in X‑Plane. Open its diagnostic window, hold the binding while speaking, and release it to see the transcript and model identity. Reassign the binding after upgrading from an earlier preview.
+
+For English-only recognition, select **Parakeet v2**. Q4_K_M, Q6_K and Q8_0 are available. The built-in recording is in English even when the interface uses French or Spanish.
 
 ## Integrate with your X-Plane plugin
 
@@ -149,17 +151,39 @@ The datarefs return zero while the provider is disabled. Their names are also de
 
 ## Settings and troubleshooting
 
-Use **Activity** to see which plugins are subscribed and inspect the 12 most recent requests. The cards display status and raw transcripts, plus the model, quantization and vocabulary status for successful requests. They also show whether the model was already loaded and how long the result took after PTT release or the start of a WAV test. The history is kept in memory for the lifetime of the provider.
+Open **Settings → Microphone → Configure microphone…**, or **Test → Check microphone…**. Pick an input or follow the system default. The guided ten-second test uses the same capture path as push-to-talk and works without a speech model. It shows the peak and average voice level in dBFS and flags a weak signal or clipping. Adjust input gain in your operating system and run the test again. **Play recording** uses the default audio output. Rekon discards the recording when you close the panel or start another test.
+
+Under **Settings → Interface language**, choose **Follow X-Plane** (default) or select a language by name. Rekon ships English, French and Spanish. The provider and Diagnostic menus and panels switch immediately, including during a PTT session. The choice is saved in X-Plane’s preferences. Recognition language and the built-in test recording keep their own selection rules.
+
+Use **Activity** to see which plugins are subscribed and inspect the 12 most recent requests. For a microphone request, wait for **Listening · Audio received** before speaking. It appears only when the provider receives confirmation of the first audio block. Activity shows the delay from PTT press to that confirmation, then transcription when the PTT is released. A release before confirmation is reported separately. WAV tests start at transcription. The cards also show the raw transcript, model, quantization, vocabulary status and time to result after release or WAV start. The history is kept in memory for the lifetime of the provider.
 
 Open **Diagnostics → Copy diagnostics** for versions, engine and model state, microphone, requested and effective compute devices, settings storage, and up to eight recent incidents. The report contains technical information only. X‑Speech Rekon entries in `Log.txt` also record status codes and timings.
 
 **Compute and memory** changes apply automatically. Use **Restart engine** between requests to restart the speech process. The active profile, subscriptions and activity history are kept during a manual engine restart. If a newly selected model fails to load, the provider can restore the last model that loaded successfully, including after restarting X‑Plane.
+
+Enable **Settings → Microphone indicator → Show in flight** for a movable indicator inside X‑Plane. It shows **Idle**, **Waiting for audio** after a PTT request starts, or **Capture** once audio arrives. The window is compact when the requester name is hidden. Set **Background opacity** and **Border opacity** independently. At 0% for both, the icon and status text remain visible. Rekon saves the indicator position and settings.
+
+Enable **Microphone monitoring** under **Settings → Microphone** to hear your own microphone through the system's default audio output while holding PTT. Monitoring is off by default. **Monitoring mode** defaults to **Standard**. **Low latency** uses the default output's reported mix rate and requests shorter buffers while the recognition stream stays at 16 kHz. Rekon falls back to **Standard**, then capture only if the output still cannot start.
+
+To compare the modes, select your simulation headset as the system's default output and use the same PTT command and monitoring volume. Try the same phrase in both modes. **Diagnostics → Last microphone monitoring** reports the mode used, the stream and output rates, and the output buffer period. That period describes the driver configuration. Record the microphone and headset output together to measure round-trip latency.
+
+For headsets with built-in sidetone, turn off Rekon's software monitoring to hear only the headset's local microphone feedback. Using both can make your voice sound distant or doubled.
+
+Set **Monitoring volume** under **Settings → Microphone**. It ranges from 0 to 100 percent, starts at 10 percent, and applies to the built-in PTT test and to clients using the base request. A client can override the volume for one PTT session by sending an `XsrPttBeginRequest` with the same ABI version and the larger structure size. The provider's monitoring preference must still be enabled. Zero mutes monitoring. The gain affects playback only.
 
 Select a Vulkan adapter under **Compute device** to try GPU inference. The status line shows the device that loaded the model, including CPU fallback if the adapter disappeared or the model failed to load on it. A compatible graphics driver provides the Vulkan runtime.
 
 Nemotron 3.5 Streaming is available in Q4_K_M, Q6_K and Q8_0. It detects the language by default and can be set to English, French or Spanish. **Early decoding** starts transcription while PTT is held.
 
 **Whisper Small.en** decodes English after PTT release. Select **Whisper Small.en · whisper.cpp** or **Whisper Small.en · transcribe.cpp** in **Settings** and download the corresponding Q8_0 file. Both use the selected CPU or Vulkan adapter. The whisper.cpp profile turns the requesting plugin's vocabulary into an initial prompt and a soft grammar. The transcribe.cpp profile uses the vocabulary as context. The two profile IDs are `whisper-small.en-whisper-cpp` and `whisper-small.en-transcribe`.
+
+If Whisper repeats the same word or phrase at the end of a result, Rekon makes one extra decoding pass. It accepts the retry only when it confirms the same words without the duplicate. If the entire transcript is an exact loop, Rekon can retain one copy from the first pass. Repeated digits stay intact. The measured decoding time includes the retry.
+
+## Add an interface language
+
+The provider and Diagnostic share the UTF-8 JSON files in `X-Speech-Rekon/locales/`. To add Italian, for example, copy `en.json` to `it.json`, translate the values and add `"it": "Italiano"` to `catalog.json`. Keep the keys unchanged. Preserve each formatted string’s `%u` arguments in order, and keep ImGui identifiers out of translations. The bundled fonts cover Latin, Greek and Cyrillic characters. Other scripts may require additional font coverage.
+
+Reload the plugins to discover new catalog entries. A language registered under its X-Plane language code can also be selected automatically. Missing or invalid translations fall back to English entry by entry. The binaries contain a copy of the English catalog for installations missing the language files. X-Plane obtains plugin descriptions at startup and the Diagnostic PTT command description when it registers the command.
 
 ## Build and test without the simulator
 

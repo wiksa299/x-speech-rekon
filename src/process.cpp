@@ -278,7 +278,8 @@ bool Process::send(const Json& message) {
     auto& state = *impl_;
     std::lock_guard lock(state.mutex);
     const auto type = message.value("type", "");
-    const bool control = type == "end" || type == "cancel" || type == "shutdown" || type == "cancel_download";
+    const bool control = type == "end" || type == "cancel" || type == "shutdown" || type == "cancel_download" ||
+        type == "mic_stop" || type == "mic_clear";
     if (state.dead || line.empty() || state.outbound.size() >= (control ? 68u : 64u)) return false;
     state.outbound.push_back(std::move(line));
     state.available.notify_one();

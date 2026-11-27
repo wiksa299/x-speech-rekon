@@ -42,6 +42,22 @@ struct CaptureState {
     Recording& target;
     const std::atomic<bool>& released;
     const std::atomic<bool>& cancelled;
+    float monitor_gain;
+    std::atomic<float> interval_peak{0};
+    ma_resampler resampler{};
+    bool resampling = false;
+    std::array<float, 1024> resampled;
+
+    ~CaptureState() { if (resampling) ma_resampler_uninit(&resampler, nullptr); }
+
+    bool set_rate(ma_uint32 rate) {
+        if (resampling) ma_resampler_uninit(&resampler, nullptr);
+        resampling = false;
+        if (rate == sample_rate) return true;
+        const auto config = ma_resampler_config_init(ma_format_f32, 1, rate, sample_rate, ma_resample_algorithm_linear);
+        resampling = ma_resampler_init(&config, nullptr, &resampler) == MA_SUCCESS;
+        return resampling;
+    }
 
     void append(const float* samples, size_t frames) {
         if (!samples || released || cancelled) return;
@@ -52,12 +68,45 @@ struct CaptureState {
         float peak = 0;
         for (size_t i = 0; i < available; ++i) peak = std::max(peak, std::abs(samples[i]));
         target.level = std::min(1.0f, peak);
+        if (target.microphone_test) {
+            auto last = interval_peak.load(std::memory_order_relaxed);
+            while (last < peak && !interval_peak.compare_exchange_weak(last, peak, std::memory_order_relaxed)) {}
+        }
         target.count.store(offset + available, std::memory_order_release);
+    }
+
+    void collect(const float* input, ma_uint64 frames) {
+        if (!resampling) {
+            append(input, static_cast<size_t>(frames));
+            return;
+        }
+        if (!input || released || cancelled) return;
+        while (frames && target.count.load(std::memory_order_relaxed) < target.samples.size() && !released && !cancelled) {
+            ma_uint64 consumed = frames, produced = resampled.size();
+            if (ma_resampler_process_pcm_frames(&resampler, input, &consumed, resampled.data(), &produced) != MA_SUCCESS ||
+                (!consumed && !produced)) {
+                target.disconnected = true;
+                return;
+            }
+            append(resampled.data(), static_cast<size_t>(produced));
+            input += consumed;
+            frames -= consumed;
+        }
     }
 };
 
-void capture_callback(ma_device* device, void*, const void* samples, ma_uint32 count) {
-    static_cast<CaptureState*>(device->pUserData)->append(static_cast<const float*>(samples), count);
+void capture_callback(ma_device* device, void* output, const void* samples, ma_uint32 count) {
+    auto& state = *static_cast<CaptureState*>(device->pUserData);
+    const auto* input = static_cast<const float*>(samples);
+    state.collect(input, count);
+    if (!output) return;
+    auto* playback = static_cast<float*>(output);
+    if (!input || state.released || state.cancelled) {
+        std::fill_n(playback, count, 0.0f);
+        return;
+    }
+    for (ma_uint32 i = 0; i < count; ++i)
+        playback[i] = std::clamp(input[i], -1.0f, 1.0f) * state.monitor_gain;
 }
 
 void notify_callback(const ma_device_notification* notification) {
@@ -65,6 +114,27 @@ void notify_callback(const ma_device_notification* notification) {
         auto& state = *static_cast<CaptureState*>(notification->pDevice->pUserData);
         if (!state.released && !state.cancelled) state.target.disconnected = true;
     }
+}
+
+struct TakePlayback {
+    const std::vector<float>& samples;
+    uint64_t session;
+    const std::atomic<uint64_t>& playing;
+    size_t offset = 0;
+    std::atomic<bool> done{false};
+    std::atomic<bool> stopped{false};
+};
+
+void play_take_callback(ma_device* device, void* output, const void*, ma_uint32 frames) {
+    auto& state = *static_cast<TakePlayback*>(device->pUserData);
+    auto* pcm = static_cast<float*>(output);
+    std::fill_n(pcm, frames, 0.0f);
+    if (state.playing != state.session) return;
+    const auto count = std::min(size_t(frames), state.samples.size() - state.offset);
+    for (size_t i = 0; i < count; ++i)
+        pcm[i] = std::clamp(state.samples[state.offset + i], -1.0f, 1.0f) * 0.5f;
+    state.offset += count;
+    if (state.offset == state.samples.size()) state.done = true;
 }
 
 } // namespace
@@ -77,7 +147,8 @@ Json microphone_list() {
     if (context.ready && ma_context_get_devices(&context.value, nullptr, nullptr,
                                                  &microphones, &count) == MA_SUCCESS) {
         for (ma_uint32 i = 0; i < count && i < 40; ++i) {
-            result.push_back({{"id", microphone_id(microphones[i])}, {"name", microphones[i].name}});
+            result.push_back({{"id", microphone_id(microphones[i])}, {"name", microphones[i].name},
+                              {"default", microphones[i].isDefault != 0}});
         }
     }
     return result;
@@ -114,17 +185,92 @@ bool contains_audio(const float* samples, size_t count) {
     return false;
 }
 
-void record(Recording& target, const std::string& microphone, const fs::path& injection,
+Json microphone_measurement(const float* samples, size_t count) {
+    constexpr size_t window = sample_rate / 50;
+    constexpr size_t quiet_windows = 2 * sample_rate / window;
+    const auto dbfs = [](double amplitude) { return 20 * std::log10(std::max(amplitude, 0.000001)); };
+    std::vector<double> quiet;
+    quiet.reserve(quiet_windows);
+    float peak = 0;
+    unsigned clipped = 0, voice_windows = 0;
+    size_t voice_samples = 0;
+    double voice_energy = 0, voice_gate = 0.000001;
+    for (size_t offset = 0; offset < count; offset += window) {
+        const auto size = std::min(window, count - offset);
+        float window_peak = 0;
+        double energy = 0;
+        for (size_t i = 0; i < size; ++i) {
+            const float sample = samples[offset + i];
+            if (!std::isfinite(sample)) continue;
+            window_peak = std::max(window_peak, std::abs(sample));
+            energy += double(sample) * sample;
+        }
+        peak = std::max(peak, window_peak);
+        if (window_peak >= 0.999f) ++clipped;
+        const double mean_energy = energy / size;
+        if (quiet.size() < quiet_windows) {
+            quiet.push_back(mean_energy);
+            if (quiet.size() == quiet_windows) {
+                auto median = quiet.begin() + quiet.size() / 2;
+                std::nth_element(quiet.begin(), median, quiet.end());
+                voice_gate = std::max(voice_gate, *median * 10);
+            }
+        } else if (mean_energy >= voice_gate) {
+            ++voice_windows;
+            voice_samples += size;
+            voice_energy += energy;
+        }
+    }
+    const bool has_voice = voice_windows >= 5;
+    return {{"peak_dbfs", dbfs(std::min(peak, 1.0f))}, {"clipped", clipped},
+            {"rms_dbfs", has_voice ? Json(dbfs(std::sqrt(voice_energy / voice_samples))) : Json(nullptr)},
+            {"capture_ms", count * 1000 / sample_rate}};
+}
+
+bool play_microphone_take(const std::vector<float>& samples, uint64_t session, const std::atomic<uint64_t>& playing) {
+    if (playing != session) return true;
+    AudioContext context;
+    if (!context.ready) return false;
+    TakePlayback state{samples, session, playing};
+    auto config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format = ma_format_f32;
+    config.playback.channels = 1;
+    config.sampleRate = sample_rate;
+    config.periodSizeInMilliseconds = 10;
+    config.dataCallback = play_take_callback;
+    config.notificationCallback = [](const ma_device_notification* event) {
+        if (event->type == ma_device_notification_type_stopped)
+            static_cast<TakePlayback*>(event->pDevice->pUserData)->stopped = true;
+    };
+    config.pUserData = &state;
+    ma_device device{};
+    if (ma_device_init(&context.value, &config, &device) != MA_SUCCESS) return false;
+    const bool started = playing == session && ma_device_start(&device) == MA_SUCCESS;
+    if (started) {
+        const auto deadline = Clock::now() + std::chrono::seconds(microphone_test_seconds + 2);
+        while (!state.done && !state.stopped && playing == session && Clock::now() < deadline)
+            std::this_thread::sleep_for(5ms);
+        if (state.done)
+            for (int i = 0; i < 20 && !state.stopped && playing == session; ++i) std::this_thread::sleep_for(5ms);
+    }
+    const bool ok = playing != session || (started && state.done && !state.stopped);
+    ma_device_uninit(&device);
+    return ok;
+}
+
+void record(Recording& target, const std::string& microphone, const fs::path& injection, float monitor_gain,
+            bool low_latency_monitoring,
             const std::atomic<bool>& released, const std::atomic<bool>& cancelled,
-            const std::function<void(float, bool)>& report) {
+            const std::function<void(float, bool, size_t, const std::string&, const CaptureMonitoring&)>& report) {
     struct CloseFlag { Recording& value; ~CloseFlag() { value.closed = true; } } close{target};
-    CaptureState state{target, released, cancelled};
+    CaptureState state{target, released, cancelled, monitor_gain};
     if (released || cancelled) return;
     if (!injection.empty()) {
         const auto input = read_wav(injection);
         if (input.empty()) { target.error = XSR_BAD_REQUEST; return; }
         state.append(input.data(), input.size());
-        if (target.count) report(target.level, true);
+        if (target.count) report(target.level, true, target.count, {}, {});
+        if (target.microphone_test) return;
         while (!released && !cancelled) std::this_thread::sleep_for(5ms);
         return;
     }
@@ -132,53 +278,90 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
     if (!context.ready) { target.error = XSR_MIC_UNAVAILABLE; return; }
     ma_device_info* devices = nullptr;
     ma_uint32 count = 0;
-    ma_device_id* chosen = nullptr;
+    std::optional<ma_device_id> chosen;
     if (!microphone.empty()) {
         if (ma_context_get_devices(&context.value, nullptr, nullptr, &devices, &count) == MA_SUCCESS) {
             for (ma_uint32 i = 0; i < count; ++i) {
-                if (microphone_id(devices[i]) == microphone) { chosen = &devices[i].id; break; }
+                if (microphone_id(devices[i]) == microphone) { chosen = devices[i].id; break; }
             }
         }
         if (!chosen) { target.error = XSR_MIC_UNAVAILABLE; return; }
     }
 
-    auto config = ma_device_config_init(ma_device_type_capture);
-    config.capture.pDeviceID = chosen;
-    config.capture.format = ma_format_f32;
-    config.capture.channels = 1;
-    config.sampleRate = sample_rate;
-    config.periodSizeInMilliseconds = 10;
-    config.dataCallback = capture_callback;
-    config.notificationCallback = notify_callback;
-    config.pUserData = &state;
     ma_device device{};
-    if (ma_device_init(&context.value, &config, &device) != MA_SUCCESS) {
-        target.error = XSR_MIC_UNAVAILABLE;
-        return;
-    }
-    if (released || cancelled) {
+    const auto start_device = [&](ma_device_type type, ma_uint32 rate, bool low_latency) {
+        target.disconnected = false;
+        auto config = ma_device_config_init(type);
+        config.capture.pDeviceID = chosen ? &*chosen : nullptr;
+        config.capture.format = ma_format_f32;
+        config.capture.channels = 1;
+        config.playback.format = ma_format_f32;
+        config.playback.channels = 1;
+        config.sampleRate = rate;
+        config.periodSizeInMilliseconds = low_latency ? 5 : 10;
+        if (low_latency) {
+            config.periods = 2;
+            config.performanceProfile = ma_performance_profile_low_latency;
+            config.noFixedSizedCallback = MA_TRUE;
+            config.wasapi.usage = ma_wasapi_usage_pro_audio;
+        }
+        config.dataCallback = capture_callback;
+        config.notificationCallback = notify_callback;
+        config.pUserData = &state;
+        if (ma_device_init(&context.value, &config, &device) != MA_SUCCESS) return false;
+        if (!released && !cancelled && state.set_rate(device.sampleRate) && ma_device_start(&device) == MA_SUCCESS) return true;
         ma_device_uninit(&device);
-        return;
+        return false;
+    };
+    bool low_latency_active = false;
+    if (monitor_gain > 0 && low_latency_monitoring) {
+        ma_device_info output{};
+        if (ma_context_get_device_info(&context.value, ma_device_type_playback, nullptr, &output) == MA_SUCCESS) {
+            for (ma_uint32 i = 0; i < output.nativeDataFormatCount; ++i) {
+                const auto& format = output.nativeDataFormats[i];
+                if (format.sampleRate && !(format.flags & MA_DATA_FORMAT_FLAG_EXCLUSIVE_MODE)) {
+                    low_latency_active = start_device(ma_device_type_duplex, format.sampleRate, true);
+                    break;
+                }
+            }
+        }
     }
-    if (ma_device_start(&device) != MA_SUCCESS) {
-        target.error = XSR_MIC_UNAVAILABLE;
-        ma_device_uninit(&device);
+    const bool duplex = low_latency_active || (monitor_gain > 0 && !released && !cancelled &&
+        start_device(ma_device_type_duplex, sample_rate, false));
+    bool recording = duplex;
+    if (!recording && !released && !cancelled) {
+        recording = start_device(ma_device_type_capture, sample_rate, false);
+    }
+    if (!recording) {
+        if (!released && !cancelled) target.error = XSR_MIC_UNAVAILABLE;
         return;
     }
 
+    CaptureMonitoring monitoring;
+    if (monitor_gain > 0) {
+        monitoring = {low_latency_active ? "low_latency" : duplex ? "standard" : "capture_only",
+                      low_latency_monitoring ? !low_latency_active : !duplex,
+                      device.sampleRate, device.playback.internalSampleRate, device.playback.internalPeriodSizeInFrames};
+    }
     bool started = false;
+    const std::string name = target.microphone_test ? device.capture.name : "";
     auto next_level = Clock::now();
     while (!released && !cancelled && !target.disconnected) {
         const auto now = Clock::now();
-        if (target.count && (!started || now >= next_level)) {
-            report(target.level, !started);
+        const auto count = target.count.load(std::memory_order_acquire);
+        if (count && (!started || now >= next_level)) {
+            const auto level = target.microphone_test ? state.interval_peak.exchange(0, std::memory_order_relaxed) :
+                target.level.load(std::memory_order_relaxed);
+            report(level, !started, count, name, monitoring);
             started = true;
             next_level = now + 100ms;
         }
+        if (target.microphone_test && count == target.samples.size()) break;
         std::this_thread::sleep_for(5ms);
     }
+    const bool disconnected = target.disconnected;
     ma_device_uninit(&device);
-    if (target.disconnected) target.error = XSR_MIC_UNAVAILABLE;
+    if (disconnected) target.error = XSR_MIC_UNAVAILABLE;
 }
 
 } // namespace xsr

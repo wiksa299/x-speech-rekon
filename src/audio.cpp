@@ -9,7 +9,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace xsr {
+namespace xsl {
 namespace {
 
 class AudioContext {
@@ -267,7 +267,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
     if (released || cancelled) return;
     if (!injection.empty()) {
         const auto input = read_wav(injection);
-        if (input.empty()) { target.error = XSR_BAD_REQUEST; return; }
+        if (input.empty()) { target.error = XSL_BAD_REQUEST; return; }
         state.append(input.data(), input.size());
         if (target.count) report(target.level, true, target.count, {}, {});
         if (target.microphone_test) return;
@@ -275,7 +275,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
         return;
     }
     AudioContext context;
-    if (!context.ready) { target.error = XSR_MIC_UNAVAILABLE; return; }
+    if (!context.ready) { target.error = XSL_MIC_UNAVAILABLE; return; }
     ma_device_info* devices = nullptr;
     ma_uint32 count = 0;
     std::optional<ma_device_id> chosen;
@@ -285,7 +285,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
                 if (microphone_id(devices[i]) == microphone) { chosen = devices[i].id; break; }
             }
         }
-        if (!chosen) { target.error = XSR_MIC_UNAVAILABLE; return; }
+        if (!chosen) { target.error = XSL_MIC_UNAVAILABLE; return; }
     }
 
     ma_device device{};
@@ -333,7 +333,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
         recording = start_device(ma_device_type_capture, sample_rate, false);
     }
     if (!recording) {
-        if (!released && !cancelled) target.error = XSR_MIC_UNAVAILABLE;
+        if (!released && !cancelled) target.error = XSL_MIC_UNAVAILABLE;
         return;
     }
 
@@ -361,7 +361,7 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
     }
     const bool disconnected = target.disconnected;
     ma_device_uninit(&device);
-    if (disconnected) target.error = XSR_MIC_UNAVAILABLE;
+    if (disconnected) target.error = XSL_MIC_UNAVAILABLE;
 }
 
-} // namespace xsr
+} // namespace xsl

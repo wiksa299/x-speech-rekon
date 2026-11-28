@@ -2,7 +2,7 @@
 /dist/
 /SPEC.md
 /PLAN.md
-/mockup-*.html
+/docs/mockups/mockup-*.html
 *.gguf
 ggml-small.en-q8_0.bin
 *.part

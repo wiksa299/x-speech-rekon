@@ -7,7 +7,7 @@
 #include <thread>
 
 namespace {
-using namespace xsr;
+using namespace xsl;
 
 class Check {
 public:
@@ -20,7 +20,7 @@ public:
           }, [&](const Delivery& message) { deliveries_.push_back(message); }) {}
 
     void start() {
-        if (!process_.start()) throw std::runtime_error("could not start xsr-engine");
+        if (!process_.start()) throw std::runtime_error("could not start xsl-engine");
         devices_ = message("hello", 5s).value("devices", Json::array());
     }
 
@@ -53,13 +53,13 @@ public:
         while (Clock::now() < deadline) {
             poll();
             const auto result = std::find_if(deliveries_.begin(), deliveries_.end(), [&](const Delivery& value) {
-                return value.session == session && value.kind == XSR_RESULT;
+                return value.session == session && value.kind == XSL_RESULT;
             });
             if (result != deliveries_.end()) {
                 check_status(result->status);
                 if (result->client != microphone_client || !result->result.value("microphone_test", false) ||
                     result->result.at("capture_ms").get<unsigned>() == 0 ||
-                    result->result.at("peak_dbfs").get<float>() <= -60 || broker_.model_state() != XSR_MODEL_MISSING)
+                    result->result.at("peak_dbfs").get<float>() <= -60 || broker_.model_state() != XSL_MODEL_MISSING)
                     throw std::runtime_error("unexpected microphone test result");
                 const auto metrics = result->result.dump();
                 send({{"type", "mic_clear"}, {"session", session}});
@@ -88,7 +88,8 @@ public:
     }
 
     void transcribe_models(const fs::path& folder, const Json& catalog, const fs::path& wav,
-                           const std::string& selection, bool microphone, std::string compute, const std::string& language) {
+                           const std::string& selection, bool microphone, std::string compute, const std::string& language,
+                           int beam_width) {
         if (compute == "vulkan") {
             if (devices_.empty()) throw std::runtime_error("no Vulkan device available");
             compute = devices_.front().at("id");
@@ -103,9 +104,13 @@ public:
         for (const auto& entry : catalog) {
             const auto name = entry.at("id").get<std::string>() + "/" + entry.at("quant").get<std::string>();
             if (!matches(entry, selection)) continue;
-            const auto file = std::find_if(found.begin(), found.end(), [&](const Json& item) {
+            const auto matches_profile = [&](const Json& item) {
                 return item.value("id", "") == entry.at("id") && item.value("quant", "") == entry.at("quant");
+            };
+            auto file = std::find_if(found.begin(), found.end(), [&](const Json& item) {
+                return matches_profile(item) && !item.value("previous", false);
             });
+            if (file == found.end()) file = std::find_if(found.begin(), found.end(), matches_profile);
             if (file == found.end()) throw std::runtime_error("model unavailable: " + name);
             send({{"type", "identify"}, {"path", file->at("path")}, {"catalog", catalog}});
             const auto model = message("identify", 20s).at("model");
@@ -113,9 +118,10 @@ public:
             Settings settings;
             settings.profile = {model.at("id"), model.at("quant"), model.at("revision"),
                                 model.at("path"), model.at("sha256")};
-            const bool cpu_only = settings.profile.moonshine_voice();
-            settings.compute = cpu_only ? "cpu" : compute;
+            settings.compute = compute;
             settings.language = language;
+            settings.vocabulary_enabled = true;
+            settings.beam_width = beam_width;
             broker_.set_settings(settings, Clock::now());
             const auto confirmed = Clock::now() + 5s;
             while (!broker_.service_ready() && Clock::now() < confirmed) {
@@ -126,29 +132,29 @@ public:
             uint64_t session = 0;
             deliveries_.clear();
             check_status(broker_.begin_local(wav.u8string(), Clock::now(), session));
-            result(session, XSR_VOCAB_NONE, name + " offline");
+            result(session, XSL_VOCAB_NONE, name + " offline");
 
             settings.early = true;
             settings.load = LoadPolicy::on_activate;
             broker_.set_settings(settings, Clock::now());
             const auto load_deadline = Clock::now() + 2s;
-            while (broker_.model_state() == XSR_MODEL_LOADING && Clock::now() < load_deadline) {
+            while (broker_.model_state() == XSL_MODEL_LOADING && Clock::now() < load_deadline) {
                 poll();
                 std::this_thread::sleep_for(5ms);
             }
-            if (broker_.model_state() != XSR_MODEL_READY)
+            if (broker_.model_state() != XSL_MODEL_READY)
                 throw std::runtime_error("loaded model did not report ready after reconfiguration: " + name);
-            const auto model_compute = cpu_only ? "CPU" : expected_compute;
-            const bool model_fallback = !cpu_only && expected_fallback;
+            const auto model_compute = expected_compute;
+            const bool model_fallback = expected_fallback;
             if (broker_.actual_compute() != model_compute || broker_.cpu_fallback() != model_fallback)
                 throw std::runtime_error("unexpected compute device for " + name + ": " + broker_.actual_compute());
             std::cout << "Compute device: " << model_compute << (model_fallback ? " (fallback)" : "") << '\n';
             injection_ = microphone ? "" : wav.u8string();
-            command(XSR_SUBSCRIBE);
-            XsrString word{"landing gear", 12};
-            command(XSR_SET_VOCABULARY, 0, &word, 1);
+            command(XSL_SUBSCRIBE);
+            XslString word{"landing gear", 12};
+            command(XSL_SET_VOCABULARY, 0, &word, 1);
             deliveries_.clear();
-            session = command(XSR_PTT_BEGIN);
+            session = command(XSL_PTT_BEGIN);
             if (microphone) {
                 std::cout << "Speak into the default microphone for four seconds.\n" << std::flush;
                 const auto end = Clock::now() + 4s;
@@ -159,8 +165,8 @@ public:
             } else {
                 wait_for_capture(session);
             }
-            command(XSR_PTT_END, session);
-            result(session, settings.profile.supports_vocabulary(settings.early) ? XSR_VOCAB_APPLIED : XSR_VOCAB_UNSUPPORTED,
+            command(XSL_PTT_END, session);
+            result(session, settings.profile.supports_vocabulary(settings.early) ? XSL_VOCAB_APPLIED : XSL_VOCAB_UNSUPPORTED,
                    name + " PTT");
             if (microphone) return;
         }
@@ -168,12 +174,12 @@ public:
 
     void verify_model_discovery(const fs::path& folder, const Json& catalog) {
         const auto entry = std::find_if(catalog.begin(), catalog.end(), [](const Json& model) {
-            return model.at("id") == "moonshine-streaming-tiny";
+            return model.at("id") == "moonshine-streaming-small";
         });
-        if (entry == catalog.end()) throw std::runtime_error("Missing Tiny fixture");
+        if (entry == catalog.end()) throw std::runtime_error("Missing Moonshine Small fixture");
         const auto original = folder / fs::u8path(entry->at("file").get<std::string>());
         const auto fixture = fs::temp_directory_path() / fs::u8path(
-            "xsr modèles " + std::to_string(Clock::now().time_since_epoch().count()));
+            "xsl modèles " + std::to_string(Clock::now().time_since_epoch().count()));
         if (!fs::create_directory(fixture)) throw std::runtime_error("cannot create test directory");
         struct RemoveFixture {
             fs::path path;
@@ -212,11 +218,11 @@ private:
         if (!process_.send(message)) throw std::runtime_error("could not send engine command");
     }
     static void check_status(uint32_t status) {
-        if (status != XSR_OK) throw std::runtime_error(status_name(status));
+        if (status != XSL_OK) throw std::runtime_error(status_name(status));
     }
-    uint64_t command(uint32_t op, uint64_t id = 0, const XsrString* terms = nullptr, uint32_t count = 0) {
-        XsrRequest request{};
-        request.version = XSR_ABI_VERSION;
+    uint64_t command(uint32_t op, uint64_t id = 0, const XslString* terms = nullptr, uint32_t count = 0) {
+        XslRequest request{};
+        request.version = XSL_ABI_VERSION;
         request.struct_size = sizeof(request);
         request.operation = op;
         request.session = id;
@@ -231,8 +237,8 @@ private:
         while (Clock::now() < end) {
             poll();
             for (const auto& event : deliveries_) {
-                if (event.session == session && event.kind == XSR_CAPTURE_STARTED) return;
-                if (event.session == session && event.kind == XSR_RESULT) check_status(event.status);
+                if (event.session == session && event.kind == XSL_CAPTURE_STARTED) return;
+                if (event.session == session && event.kind == XSL_RESULT) check_status(event.status);
             }
             std::this_thread::sleep_for(5ms);
         }
@@ -243,12 +249,17 @@ private:
         while (Clock::now() < end) {
             poll();
             for (const auto& event : deliveries_) {
-                if (event.session != session || event.kind != XSR_RESULT) continue;
+                if (event.session != session || event.kind != XSL_RESULT) continue;
                 check_status(event.status);
                 if (event.result.at("vocabulary") != vocabulary || event.result.value("text", "").empty())
                     throw std::runtime_error("unexpected result for " + name);
+                const auto& candidates = event.result.at("candidates");
+                if (!candidates.is_array() || candidates.size() > XSL_MAX_CANDIDATES ||
+                    (!candidates.empty() && candidates.front() != event.result.at("text")))
+                    throw std::runtime_error("unexpected ranked candidates for " + name);
                 std::cout << name << " [" << event.result.value("compute_ms", 0)
                           << " ms, " << event.result.value("language", "") << "] " << event.result.value("text", "") << '\n';
+                if (candidates.size() > 1) std::cout << "Candidates: " << candidates.dump() << '\n';
                 return;
             }
             std::this_thread::sleep_for(5ms);
@@ -316,8 +327,12 @@ int run(const std::vector<fs::path>& args) {
             const auto microphone = std::find(args.begin(), args.end(), fs::path("--mic")) != args.end();
             const auto compute = option("--compute").u8string();
             const auto language = option("--language").u8string();
+            const auto width = option("--beam").u8string();
+            if (!width.empty() && (width.size() != 1 || width[0] < '1' || width[0] > '4'))
+                throw std::runtime_error("--beam expects 1, 2, 3 or 4");
             check.transcribe_models(models, catalog, wav, selection, microphone,
-                                    compute.empty() ? "cpu" : compute, language.empty() ? "auto" : language);
+                                    compute.empty() ? "cpu" : compute, language.empty() ? "auto" : language,
+                                    width.empty() ? 1 : width[0] - '0');
         }
         return 0;
     } catch (const std::exception& error) {
@@ -332,5 +347,5 @@ int wmain(int argc, wchar_t** argv) {
 #else
 int main(int argc, char** argv) {
 #endif
-    return run(std::vector<xsr::fs::path>(argv + 1, argv + argc));
+    return run(std::vector<xsl::fs::path>(argv + 1, argv + argc));
 }

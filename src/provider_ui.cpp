@@ -10,25 +10,30 @@
 #include <cstring>
 #include <limits>
 
-namespace xsr {
+namespace xsl {
 namespace {
-struct ModelName { const char* id; const char* label; };
-constexpr ModelName names[] = {
-    {"parakeet-tdt-0.6b-v3", "Parakeet v3"},
-    {parakeet_v2_id, "Parakeet v2"},
-    {nemotron_id, "Nemotron 3.5 Streaming"},
-    {whisper_cpp_id, "Whisper Small.en · whisper.cpp"},
-    {whisper_transcribe_id, "Whisper Small.en · transcribe.cpp"},
-    {"moonshine-streaming-tiny", "Moonshine Tiny"},
-    {"moonshine-streaming-small", "Moonshine Small"},
-    {"moonshine-streaming-medium", "Moonshine Medium"},
-    {"moonshine-voice-small", "Moonshine Voice Small"},
-    {"moonshine-voice-medium", "Moonshine Voice Medium"},
+struct ModelInfo {
+    const char* id;
+    const char* label;
+    const char* description_key;
+};
+constexpr ModelInfo model_options[] = {
+    {"parakeet-tdt-0.6b-v3", "Parakeet v3", "model_description_parakeet_v3"},
+    {parakeet_v2_id, "Parakeet v2", "model_description_parakeet_v2"},
+    {nemotron_id, "Nemotron 3.5 Streaming", "model_description_nemotron"},
+    {moonshine_small_id, "Moonshine Small", "model_description_moonshine_small"},
+    {fluid_mini_id, "Fluid Speech Mini", "model_description_fluid_mini"},
+    {fluid_pro_id, "Fluid Speech Pro", "model_description_fluid_pro"},
 };
 
+const ModelInfo* find_model_info(const std::string& id) {
+    for (const auto& model : model_options) if (id == model.id) return &model;
+    return nullptr;
+}
+
 const char* model_label(const std::string& id) {
-    for (const auto& model : names) if (id == model.id) return model.label;
-    return "—";
+    const auto* model = find_model_info(id);
+    return model ? model->label : "—";
 }
 
 const char* activity_phase_label(ActivityPhase phase) {
@@ -62,21 +67,49 @@ std::string incident_time(std::time_t when) {
     std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M:%S", &clock);
     return formatted;
 }
+
+void status_heading(Window& window, const char* heading, const char* status, ImVec4 color) {
+    constexpr float dot_width = 8.f, dot_gap = 6.f;
+    const float room = ImGui::GetContentRegionAvail().x;
+    const float right = ImGui::GetCursorPosX() + room;
+    const float status_width = ImGui::CalcTextSize(status).x + dot_width + dot_gap + 1.f;
+    window.section_heading(heading);
+    if (ImGui::GetItemRectSize().x + ImGui::GetStyle().ItemSpacing.x + status_width <= room)
+        ImGui::SameLine(right - status_width);
+
+    const auto pos = ImGui::GetCursorScreenPos();
+    const float height = ImGui::GetTextLineHeight();
+    ImGui::GetWindowDrawList()->AddCircleFilled({pos.x + dot_width / 2, pos.y + height / 2},
+                                               3.5f, ImGui::GetColorU32(color));
+    ImGui::Dummy({dot_width, height});
+    ImGui::SameLine(0, dot_gap);
+    ImGui::TextWrapped("%s", status);
+}
+
+bool next_action_button(const char* label) {
+    const auto& style = ImGui::GetStyle();
+    const float width = ImGui::CalcTextSize(label, nullptr, true).x + 2 * style.FramePadding.x;
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::GetItemRectMax().x + style.ItemSpacing.x + width <= right) ImGui::SameLine();
+    return ImGui::Button(label);
+}
 } // namespace
 
 const char* Provider::status_label(uint32_t code) {
     switch (code) {
-    case XSR_OK: return tr("ready");
-    case XSR_BUSY: return tr("microphone_in_use");
-    case XSR_MODEL_UNAVAILABLE: return tr("model_unavailable");
-    case XSR_MIC_UNAVAILABLE: return tr("microphone_unavailable");
-    case XSR_ENGINE_LOST: return tr("engine_stopped");
-    case XSR_ENGINE_RESTARTING: return tr("engine_starting");
-    case XSR_TIMEOUT: return tr("timed_out");
-    case XSR_CANCELLED: return tr("cancelled");
-    case XSR_NO_AUDIO: return tr("no_audio_captured");
-    case XSR_NO_SPEECH: return tr("no_speech_detected");
-    case XSR_OUTPUT_TRUNCATED: return tr("transcript_too_long");
+    case XSL_OK: return tr("ready");
+    case XSL_BUSY: return tr("microphone_in_use");
+    case XSL_MODEL_UNAVAILABLE: return tr("model_unavailable");
+    case XSL_MIC_UNAVAILABLE: return tr("microphone_unavailable");
+    case XSL_ENGINE_LOST: return tr("engine_stopped");
+    case XSL_ENGINE_RESTARTING: return tr("engine_starting");
+    case XSL_ENGINE_DISABLED: return tr("engine_disabled");
+    case XSL_ENGINE_SUSPENDED: return tr("engine_suspended");
+    case XSL_TIMEOUT: return tr("timed_out");
+    case XSL_CANCELLED: return tr("cancelled");
+    case XSL_NO_AUDIO: return tr("no_audio_captured");
+    case XSL_NO_SPEECH: return tr("no_speech_detected");
+    case XSL_OUTPUT_TRUNCATED: return tr("transcript_too_long");
     default: return tr("transcription_failed");
     }
 }
@@ -103,13 +136,13 @@ const char* Provider::test_source_label(TestSource type) {
 }
 
 const char* Provider::activity_status(uint32_t status, uint32_t stage, TestSource source) {
-    if (status == XSR_TIMEOUT && stage == XSR_STAGE_CAPTURE_START)
+    if (status == XSL_TIMEOUT && stage == XSL_STAGE_CAPTURE_START)
         return tr("microphone_start_timed_out");
-    if (status == XSR_TIMEOUT && stage == XSR_STAGE_CAPTURE)
+    if (status == XSL_TIMEOUT && stage == XSL_STAGE_CAPTURE)
         return tr("capture_time_limit_reached");
-    if (status == XSR_TIMEOUT && stage == XSR_STAGE_TRANSCRIPTION)
+    if (status == XSL_TIMEOUT && stage == XSL_STAGE_TRANSCRIPTION)
         return tr("transcription_timed_out");
-    if (status == XSR_BAD_REQUEST && source != TestSource::microphone)
+    if (status == XSL_BAD_REQUEST && source != TestSource::microphone)
         return tr("unreadable_wav_or_longer_than_30_seconds");
     return status_label(status);
 }
@@ -129,47 +162,17 @@ std::string Provider::compute_label(const std::string& id) const {
 
 void Provider::draw() {
     refresh_language();
-    const auto& active = broker_.settings().profile;
-    const auto state = broker_.model_state();
-    const char* summary = status_label(broker_.ready() ? XSR_MODEL_UNAVAILABLE : engine_status_);
-    ImVec4 color = amber_text;
-    if (broker_.ready()) {
-        switch (state) {
-        case XSR_MODEL_READY:
-            summary = tr("model_loaded");
-            color = green_text;
-            break;
-        case XSR_MODEL_LOADING:
-            summary = tr("loading_model");
-            break;
-        case XSR_MODEL_UNLOADED:
-            summary = tr("model_ready_to_load");
-            color = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-            break;
-        }
-    }
-    const auto& actual = broker_.actual_compute();
-    const auto compute = broker_.cpu_fallback() ? tr("cpu_fallback") :
-        actual.empty() ? (active.moonshine_voice() ? "CPU" : compute_label(draft_.compute)) : actual;
-    ImGui::PushStyleColor(ImGuiCol_Text, color);
-    if (active.id.empty()) {
-        ImGui::TextWrapped("%s · %s", summary, compute.c_str());
-    } else {
-        ImGui::TextWrapped("%s · %s %s · %s", summary, model_label(active.id), active.quant.c_str(), compute.c_str());
-    }
-    ImGui::PopStyleColor();
-
     if (local_held_ && !window_.pointer_pressed()) {
         const auto now = Clock::now();
         const auto status = broker_.end_local(test_session_, now);
-        if (status == XSR_OK) {
+        if (status == XSL_OK) {
             if (auto* row = pending_activity(local_client, test_session_)) row->progress.processing_since = now;
         } else if (test_pending_) test_status_ = status;
         local_held_ = false;
         listening_ = false;
     }
 
-    xsr::push_settings_style();
+    xsl::push_settings_style();
     if (ImGui::BeginTabBar("provider-pages", ImGuiTabBarFlags_DrawSelectedOverline)) {
         if (ImGui::BeginTabItem(ui_label("settings"))) {
             draw_settings();
@@ -190,7 +193,100 @@ void Provider::draw() {
         ImGui::EndTabBar();
     }
     draw_microphone_panel();
-    xsr::pop_settings_style();
+    xsl::pop_settings_style();
+}
+
+void Provider::draw_model_heading() {
+    const auto& active = broker_.settings().profile;
+    const auto state = broker_.model_state();
+    if (state == XSL_MODEL_READY) {
+        const auto status = std::string(tr("model_loaded")) + " · " + model_label(active.id) + " · " + active.quant;
+        status_heading(window_, tr("models"), status.c_str(), green_text);
+    } else if (state == XSL_MODEL_LOADING) {
+        status_heading(window_, tr("models"), tr("loading_model"), amber_text);
+    } else {
+        const auto* label = state == XSL_MODEL_UNLOADED ? tr("unloaded") : tr("model_unavailable");
+        status_heading(window_, tr("models"), label, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    }
+}
+
+const char* Provider::engine_state_label() const {
+    if (broker_.service_ready()) return tr("ready");
+    if (manually_restarting_ && (engine_status_ == XSL_ENGINE_RESTARTING || engine_status_ == XSL_OK))
+        return tr("engine_restarting");
+    return status_label(broker_.ready() ? XSL_ENGINE_RESTARTING : engine_status_);
+}
+
+bool Provider::draw_engine_settings() {
+    const bool ready = broker_.service_ready();
+    const bool enabled = engine_mode_ != EngineMode::disabled;
+    const bool suspended = engine_mode_ == EngineMode::suspended;
+    const bool busy = engine_controls_busy();
+    const bool wide = ImGui::GetContentRegionAvail().x >= 430;
+    const auto color = !enabled || suspended ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) :
+        engine_failure_ ? ImVec4{0.93f, 0.58f, 0.59f, 1.f} : ready ? green_text : amber_text;
+    std::string status = engine_state_label();
+    if (ready) status += " · transcribe.cpp";
+    status_heading(window_, tr("engine"), status.c_str(), color);
+    if (enabled && engine_failure_) ImGui::TextWrapped("%s", tr(engine_failure_));
+
+    ImGui::BeginDisabled(busy);
+    bool next_enabled = enabled;
+    if (ImGui::Checkbox(ui_label("enable_engine"), &next_enabled))
+        change_engine_mode(next_enabled ? EngineMode::enabled : EngineMode::disabled);
+    ImGui::BeginDisabled(!enabled);
+    if (next_action_button(ui_label(suspended ? "resume_engine" : "suspend_engine")))
+        change_engine_mode(suspended ? EngineMode::enabled : EngineMode::suspended);
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!enabled || suspended);
+    if (next_action_button(ui_label("restart_engine"))) {
+        manually_restarting_ = true;
+        restart_engine();
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(!ready || busy);
+    const bool show_threads = draft_.compute == "cpu";
+    const bool columns = show_threads && wide &&
+        ImGui::BeginTable("engine-compute", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoPadOuterX);
+    if (columns) ImGui::TableNextColumn();
+    const bool changed = draw_compute();
+    if (show_threads) {
+        if (columns) ImGui::TableNextColumn();
+        ImGui::TextUnformatted(tr("cpu_threads"));
+        char available[96];
+        std::snprintf(available, sizeof(available), tr("cpu_threads_available"), unsigned(available_cpu_threads_));
+        const float room = ImGui::GetContentRegionAvail().x;
+        const float count_width = ImGui::CalcTextSize(available).x + ImGui::GetStyle().ItemSpacing.x;
+        const bool inline_count = room >= count_width + 80.0f;
+        ImGui::SetNextItemWidth(std::min(180.0f, room - (inline_count ? count_width : 0.0f)));
+        const auto preview = std::to_string(requested_cpu_threads_);
+        if (ImGui::BeginCombo("##cpu-threads", preview.c_str())) {
+            for (int count = 1; count <= available_cpu_threads_; ++count) {
+                if (ImGui::Selectable(std::to_string(count).c_str(), count == requested_cpu_threads_)) {
+                    requested_cpu_threads_ = count;
+                    save_preferences();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (inline_count) ImGui::SameLine();
+        ImGui::TextDisabled("%s", available);
+    }
+    if (columns) ImGui::EndTable();
+    ImGui::EndDisabled();
+
+    const auto& actual = broker_.actual_compute();
+    const bool show_effective = broker_.cpu_fallback() ||
+        (!actual.empty() && actual != compute_label(draft_.compute));
+    if (broker_.model_state() == XSL_MODEL_READY && show_effective) {
+        const char* device = broker_.cpu_fallback() ? tr("cpu_fallback") : actual.c_str();
+        ImGui::TextWrapped("%s · %s", tr("effective_compute"), device);
+    }
+    if (show_threads)
+        ImGui::TextDisabled("%s", tr("threads_apply_on_restart"));
+    return changed;
 }
 
 void Provider::draw_settings() {
@@ -198,25 +294,26 @@ void Provider::draw_settings() {
         ImGui::EndChild();
         return;
     }
-    if (ImGui::BeginChild("model", {}, settings_panel_flags)) draw_models();
-    ImGui::EndChild();
     bool changed = false;
-    if (ImGui::BeginChild("compute-and-memory", {}, settings_panel_flags)) changed = draw_compute_and_memory();
+    if (ImGui::BeginChild("engine-settings", {}, settings_panel_flags)) changed = draw_engine_settings();
+    ImGui::EndChild();
+    if (ImGui::BeginChild("model", {}, settings_panel_flags)) changed |= draw_models();
+    ImGui::EndChild();
+    if (ImGui::BeginChild("models-folder", {}, settings_panel_flags)) draw_models_folder();
     ImGui::EndChild();
     if (ImGui::BeginChild("recognition", {}, settings_panel_flags)) changed |= draw_recognition_settings();
     ImGui::EndChild();
     if (ImGui::BeginChild("microphone-settings", {}, settings_panel_flags)) {
         window_.section_heading(tr("microphone"));
         ImGui::TextWrapped("%s", microphone_label().c_str());
-        if (ImGui::Button(ui_label("configure_microphone")))
-            request_microphone_panel();
+        draw_microphone_button();
         ImGui::BeginDisabled(broker_.busy());
         changed |= ImGui::Checkbox(ui_label("microphone_monitoring"), &draft_.sidetone);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr("monitoring_tooltip"));
         if (draft_.sidetone) {
             int gain = static_cast<int>(draft_.monitor_gain_percent);
             if (ImGui::SliderInt(ui_label("monitoring_volume"),
-                                 &gain, 0, XSR_MAX_MONITOR_GAIN_PERCENT, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+                                 &gain, 0, XSL_MAX_MONITOR_GAIN_PERCENT, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
                 draft_.monitor_gain_percent = static_cast<uint32_t>(gain);
                 changed = true;
             }
@@ -266,85 +363,113 @@ void Provider::draw_settings() {
     ImGui::EndChild();
 }
 
-void Provider::draw_models() {
-    window_.section_heading(tr("model"));
+bool Provider::draw_models() {
+    draw_model_heading();
+    ImGui::BeginDisabled(!broker_.ready() || identify_ticket_);
+    ImGui::TextUnformatted(tr("model"));
     ImGui::SetNextItemWidth(-1);
     if (ImGui::BeginCombo("##model", model_label(selected_id_))) {
-        for (const auto& model : names) {
-            const Profile choice{model.id, {}, {}, {}, {}};
-            if (choice.moonshine_voice() && std::none_of(catalog_.begin(), catalog_.end(),
-                    [&](const Json& entry) { return entry.at("id") == model.id; })) continue;
+        for (const auto& model : model_options) {
+            auto quantization = default_quantization_for(model.id);
+            if (quantization.empty()) continue;
             if (ImGui::Selectable(model.label, selected_id_ == model.id)) {
                 selected_id_ = model.id;
-                selected_quant_ = choice.moonshine_voice() ? "ORT" : "Q8_0";
+                selected_quant_ = std::move(quantization);
                 model_picker_edited_ = true;
             }
         }
         ImGui::EndCombo();
     }
-    if (selected_id_ == parakeet_v2_id || selected_id_ == whisper_cpp_id || selected_id_ == whisper_transcribe_id) {
-        ImGui::TextDisabled("%s", tr("english_only"));
-    }
-    if (selected_quant_ == "ORT") {
-        ImGui::TextDisabled("%s", tr("cpu_english"));
-    } else {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(tr("quantization"));
-        const bool label_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
-        ImGui::SameLine(0, 5);
-        ImGui::TextDisabled("(?)");
-        if ((label_hovered || ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) && ImGui::BeginTooltip()) {
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24 * ImGui::GetFontSize());
-            ImGui::TextUnformatted(tr("quantization_tooltip"));
-            ImGui::PopTextWrapPos();
-            ImGui::EndTooltip();
-        }
-        if (ImGui::GetContentRegionAvail().x >= 345) ImGui::SameLine();
-        for (const char* quant : {"Q4_K_M", "Q6_K", "Q8_0"}) {
-            const bool available = std::any_of(catalog_.begin(), catalog_.end(), [&](const Json& entry) {
-                return entry.at("id") == selected_id_ && entry.at("quant") == quant;
-            });
-            const bool selected = selected_quant_ == quant;
-            if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-            ImGui::BeginDisabled(!available);
-            if (ImGui::Button(quant)) {
-                selected_quant_ = quant;
-                model_picker_edited_ = true;
+    if (const auto* model = find_model_info(selected_id_)) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        const auto* artifact = selected_entry();
+        const auto measured_ram = artifact ? artifact->find("peak_cpu_ram_mib") : Json::const_iterator{};
+        if (artifact && measured_ram != artifact->end() && measured_ram->is_number_unsigned() &&
+            *measured_ram > 0 && *measured_ram <= std::numeric_limits<unsigned>::max() - 5) {
+            const auto peak = measured_ram->get<unsigned>();
+            const char* level = peak < 600 ? "model_ram_light" : peak < 1000 ? "model_ram_medium" : "model_ram_heavy";
+            auto ram = std::to_string((peak + 5) / 10 * 10);
+            for (auto offset = ram.size(); offset > 3;) {
+                offset -= 3;
+                ram.insert(offset, tr("model_ram_thousands_separator"));
             }
-            ImGui::EndDisabled();
-            if (selected) ImGui::PopStyleColor();
-            if (std::strcmp(quant, "Q8_0") != 0) ImGui::SameLine();
+            ImGui::TextWrapped("%s · ~ %s %s · %s", tr(level), ram.c_str(),
+                               tr("model_ram_unit"), tr(model->description_key));
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip) && ImGui::BeginTooltip()) {
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 26 * ImGui::GetFontSize());
+                ImGui::TextUnformatted(tr("model_ram_tooltip"));
+                ImGui::PopTextWrapPos();
+                ImGui::EndTooltip();
+            }
+        } else {
+            ImGui::TextWrapped("%s", tr(model->description_key));
         }
+        ImGui::PopStyleColor();
     }
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(tr("quantization"));
+    const bool label_hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
+    ImGui::SameLine(0, 5);
+    ImGui::TextDisabled("(?)");
+    if ((label_hovered || ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) && ImGui::BeginTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24 * ImGui::GetFontSize());
+        ImGui::TextUnformatted(tr("quantization_tooltip"));
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    if (ImGui::GetContentRegionAvail().x >= 345) ImGui::SameLine();
+    const auto quantizations = selected_id_ == fluid_mini_id ? std::vector<const char*>{"Q2_K/Q4_K"} :
+        std::vector<const char*>{"Q4_K_M", "Q6_K", "Q8_0"};
+    for (const char* quant : quantizations) {
+        const bool available = std::any_of(catalog_.begin(), catalog_.end(), [&](const Json& entry) {
+            return entry.at("id") == selected_id_ && entry.at("quant") == quant;
+        });
+        const bool selected = selected_quant_ == quant;
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        ImGui::BeginDisabled(!available);
+        if (ImGui::Button(quant)) {
+            selected_quant_ = quant;
+            model_picker_edited_ = true;
+        }
+        ImGui::EndDisabled();
+        if (selected) ImGui::PopStyleColor();
+        if (quant != quantizations.back()) ImGui::SameLine();
+    }
+    ImGui::EndDisabled();
     const auto* artifact = selected_entry();
-    const auto candidate = candidate_path();
+    const auto installed = candidate_path(false);
+    const auto candidate = installed.empty() ? candidate_path() : installed;
     if (artifact) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%.1f %s · %s", artifact->at("bytes").get<double>() / 1000000.0,
             tr("mb"),
-            candidate.empty() ? tr("not_installed") :
+            installed.empty() ? tr("not_installed") :
                                 tr("found_locally"));
         ImGui::PopStyleColor();
     }
-    const bool missing_whisper = selected_id_ == whisper_cpp_id && broker_.ready() && whisper_version_.empty();
-    if (missing_whisper) ImGui::TextWrapped("%s", tr("whisper_engine_missing_from_this_installation"));
-    ImGui::BeginDisabled(!broker_.ready() || missing_whisper || identify_ticket_ || browse_ticket_ || wav_ticket_ ||
-                         candidate.empty() || broker_.busy());
-    ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
-    if (ImGui::Button(ui_label("use_this_model"))) identify(candidate);
-    ImGui::PopStyleColor();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!broker_.ready() || !artifact || download_ticket_ || browse_ticket_);
-    if (ImGui::Button(ui_label("download"))) {
-        if (file_request(download_ticket_, {{"type", "download"}, {"path", folder_.u8string()}, {"entry", *artifact}},
-                         30min)) {
-            download_total_ = artifact->at("bytes").get<uint64_t>();
-            downloaded_ = 0;
-            download_state_.clear();
-        } else download_state_ = "error";
+    const auto& active = broker_.settings().profile;
+    const bool selection_changed = selected_id_ != active.id || selected_quant_ != active.quant ||
+        (!candidate.empty() && candidate != active.path);
+    if (selection_changed) {
+        ImGui::BeginDisabled(!broker_.ready() || engine_controls_busy() || candidate.empty());
+        ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
+        if (ImGui::Button(ui_label("use_this_model"))) identify(candidate);
+        ImGui::PopStyleColor();
+        ImGui::EndDisabled();
     }
-    ImGui::EndDisabled();
+    if (artifact && installed.empty() && !scan_ticket_) {
+        if (selection_changed) ImGui::SameLine();
+        ImGui::BeginDisabled(!broker_.ready() || download_ticket_ || browse_ticket_ || folder_change_);
+        if (ImGui::Button(ui_label("download"))) {
+            if (file_request(download_ticket_, {{"type", "download"}, {"path", folder_.u8string()}, {"entry", *artifact}},
+                             30min)) {
+                download_total_ = artifact->at("bytes").get<uint64_t>();
+                downloaded_ = 0;
+                download_state_.clear();
+            } else download_state_ = "error";
+        }
+        ImGui::EndDisabled();
+    }
     if (download_ticket_) {
         ImGui::ProgressBar(download_total_ ? float(double(downloaded_) / double(download_total_)) : 0.f);
         if (ImGui::Button(ui_label("cancel_transfer")))
@@ -352,30 +477,55 @@ void Provider::draw_models() {
     } else if (download_state_ == "ok") {
         ImGui::TextUnformatted(tr("download_verified"));
     } else if (download_state_ == "cancelled") {
-        ImGui::TextUnformatted(status_label(XSR_CANCELLED));
+        ImGui::TextUnformatted(status_label(XSL_CANCELLED));
     } else if (download_state_ == "exists") {
         ImGui::TextWrapped("%s", tr("model_filename_conflict"));
     } else if (!download_state_.empty()) {
         ImGui::TextWrapped("%s", tr("could_not_install_the_download"));
     }
     if (catalog_error_) ImGui::TextWrapped("%s", tr("invalid_model_catalog"));
-    if (model_error_) ImGui::TextWrapped("%s", status_label(XSR_MODEL_UNAVAILABLE));
+    if (model_error_) ImGui::TextWrapped("%s", status_label(XSL_MODEL_UNAVAILABLE));
     if (profile_recovered_) ImGui::TextWrapped("%s", tr("restored_the_last_working_model"));
-    if (!ImGui::TreeNode(ui_label("models_folder"))) return;
-    ImGui::TextWrapped("%s", folder_.u8string().c_str());
-    ImGui::BeginDisabled(!broker_.ready() || browse_ticket_ || wav_ticket_ || scan_ticket_ || identify_ticket_);
+
+    return draw_model_memory();
+}
+
+void Provider::draw_models_folder() {
+    window_.section_heading(tr("models_folder"));
+    const auto active_path = folder_.u8string();
+    const bool unavailable = !broker_.ready() || browse_ticket_ || wav_ticket_ || scan_ticket_ || identify_ticket_;
+    const bool downloading = bool(download_ticket_);
+    ImGui::BeginDisabled(unavailable || downloading);
+    ImGui::SetNextItemWidth(-1);
+    window_.edit_text("##models-folder-path", tr("models_folder_path_hint"), folder_draft_);
+    ImGui::EndDisabled();
+    if (!active_path.empty() && folder_draft_ != active_path) {
+        window_.include_glyphs(active_path);
+        ImGui::TextWrapped("%s · %s", tr("active_models_folder"), active_path.c_str());
+    }
+    ImGui::BeginDisabled(unavailable);
+    ImGui::BeginDisabled(downloading);
+    ImGui::BeginDisabled(folder_draft_.empty() || folder_draft_ == active_path);
+    if (ImGui::Button(ui_label("apply_models_folder"))) change_models_folder(folder_draft_, true);
+    ImGui::EndDisabled();
 #ifdef _WIN32
-    ImGui::BeginDisabled(bool(download_ticket_));
-    if (ImGui::Button(ui_label("browse"))) {
+    if (next_action_button(ui_label("browse"))) {
         folder_picker_failed_ = !file_request(browse_ticket_, {{"type", "browse"}}, 10min);
     }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
 #endif
-    if (ImGui::Button(ui_label("rescan"))) scan();
     ImGui::EndDisabled();
+    if (next_action_button(ui_label("rescan"))) scan();
+    ImGui::BeginDisabled(downloading);
+    if (next_action_button(ui_label("default_models_folder"))) change_models_folder((root_ / "models").u8string(), false);
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    if (scan_ticket_ || browse_ticket_)
+        ImGui::TextDisabled("%s", tr("models_folder_pending"));
     if (scan_error_) ImGui::TextWrapped("%s", tr("could_not_scan_the_models_folder"));
     if (folder_picker_failed_) ImGui::TextWrapped("%s", tr("could_not_open_the_folder_picker"));
+    if (broker_.ready() && !scan_ticket_ && !browse_ticket_ && !scan_error_ && !folder_picker_failed_ &&
+        std::none_of(models_.begin(), models_.end(), [](const Json& model) { return model.value("state", "") == "candidate"; }))
+        ImGui::TextWrapped("%s", tr("no_compatible_models_found"));
     const bool incompatible = std::any_of(models_.begin(), models_.end(), [](const Json& model) {
         return model.value("state", "") != "candidate";
     });
@@ -387,7 +537,6 @@ void Provider::draw_models() {
         }
         ImGui::TreePop();
     }
-    ImGui::TreePop();
 }
 
 bool Provider::draw_recognition_settings() {
@@ -407,10 +556,53 @@ bool Provider::draw_recognition_settings() {
             changed = true;
         }
     }
+    bool early = active.streaming() && draft_.early;
     ImGui::BeginDisabled(!active.streaming());
-    changed |= ImGui::Checkbox(ui_label("early_decoding"), &draft_.early);
+    if (ImGui::Checkbox(ui_label("early_decoding"), &early)) {
+        draft_.early = early;
+        changed = true;
+    }
     ImGui::EndDisabled();
-    if (active.nemotron() && draft_.early) {
+    if (active.supports_beam()) {
+        const char* modes[] = {ui_label("greedy_decoding"), "2", "3", "4"};
+        int index = draft_.beam_width - 1;
+        ImGui::TextUnformatted(tr("decoding_paths"));
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("##decoding-paths", &index, modes, int(XSL_MAX_CANDIDATES))) {
+            draft_.beam_width = index + 1;
+            changed = true;
+        }
+    }
+    if (active.supports_vocabulary()) {
+        bool enabled = draft_.vocabulary_enabled.value_or(!active.moonshine_small());
+        ImGui::BeginDisabled(early);
+        bool shown = enabled && !early;
+        if (ImGui::Checkbox(ui_label("vocabulary_bias"), &shown)) {
+            draft_.vocabulary_enabled = enabled = shown;
+            changed = true;
+        }
+        if (active.supports_vocabulary_weight()) {
+            ImGui::BeginDisabled(!enabled);
+            ImGui::TextUnformatted(tr("vocabulary_weight"));
+            float weight = draft_.vocabulary_weight < 0.0f ? (active.moonshine_small() ? 2.0f : 3.0f) :
+                draft_.vocabulary_weight;
+            ImGui::SetNextItemWidth(-std::max(85.0f, ImGui::CalcTextSize(tr("auto")).x + 24.0f));
+            if (ImGui::SliderFloat("##vocabulary-weight", &weight, 0.0f, 4.0f, "%.1f")) {
+                draft_.vocabulary_weight = weight;
+                changed = true;
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(draft_.vocabulary_weight < 0.0f);
+            if (ImGui::Button(ui_label("auto"))) {
+                draft_.vocabulary_weight = -1.0f;
+                changed = true;
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+        }
+        ImGui::EndDisabled();
+    }
+    if (early) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
         ImGui::TextWrapped("%s", tr("vocabulary_requires_decoding_after_release"));
         ImGui::PopStyleColor();
@@ -420,23 +612,12 @@ bool Provider::draw_recognition_settings() {
     return changed;
 }
 
-bool Provider::draw_compute_and_memory() {
-    const char* heading = tr("compute_and_memory");
-    const char* automatic = tr("applies_automatically");
-    const float automatic_width = ImGui::CalcTextSize(automatic).x;
-    const float room_for_heading = ImGui::GetContentRegionAvail().x;
-    const float automatic_x = ImGui::GetCursorPosX() + room_for_heading - automatic_width;
-    window_.section_heading(heading);
-    if (1.2f * ImGui::CalcTextSize(heading).x + automatic_width + 16 <= room_for_heading)
-        ImGui::SameLine(automatic_x);
-    ImGui::TextDisabled("%s", automatic);
-    ImGui::BeginDisabled(broker_.busy());
+bool Provider::draw_compute() {
     bool changed = false;
     ImGui::TextUnformatted(tr("compute_device"));
-    const bool cpu_only = broker_.settings().profile.moonshine_voice();
-    const auto compute = cpu_only ? "CPU" : compute_label(draft_.compute);
+    const auto compute = compute_label(draft_.compute);
     ImGui::SetNextItemWidth(-1);
-    ImGui::BeginDisabled(cpu_only || !broker_.ready() || (compute_devices_.empty() && draft_.compute == "cpu"));
+    ImGui::BeginDisabled(!broker_.ready() || (compute_devices_.empty() && draft_.compute == "cpu"));
     if (ImGui::BeginCombo("##compute", compute.c_str())) {
         if (ImGui::Selectable("CPU", draft_.compute == "cpu")) {
             draft_.compute = "cpu";
@@ -455,7 +636,12 @@ bool Provider::draw_compute_and_memory() {
         ImGui::EndCombo();
     }
     ImGui::EndDisabled();
+    return changed;
+}
 
+bool Provider::draw_model_memory() {
+    ImGui::BeginDisabled(!broker_.ready() || broker_.busy());
+    bool changed = false;
     int load = int(draft_.load), unload = int(draft_.unload);
     const char* loads[] = {
         ui_label("on_first_use"),
@@ -468,7 +654,7 @@ bool Provider::draw_compute_and_memory() {
     };
     const float room = ImGui::GetContentRegionAvail().x;
     const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const bool two_columns = room >= 315;
+    const bool two_columns = room >= 430;
     const float combo_width = (room - gap) / 2;
     const float second_column = ImGui::GetCursorPosX() + combo_width + gap;
     const char* unload_label = tr("unload_model");
@@ -488,14 +674,14 @@ bool Provider::draw_compute_and_memory() {
     if (draft_.unload == UnloadPolicy::after_idle) {
         ImGui::TextUnformatted(tr("idle_time_min"));
         ImGui::SetNextItemWidth(-1);
-        changed |= ImGui::SliderInt("##idle-minutes", &draft_.idle_minutes, 1, 60);
+        ImGui::SliderInt("##idle-minutes", &idle_minutes_draft_, 1, 60);
+        if (ImGui::IsItemDeactivatedAfterEdit() && draft_.idle_minutes != idle_minutes_draft_) {
+            draft_.idle_minutes = idle_minutes_draft_;
+            changed = true;
+        }
+    } else {
+        idle_minutes_draft_ = draft_.idle_minutes;
     }
-    ImGui::EndDisabled();
-
-    ImGui::Separator();
-    const bool restarting = engine_restart_.valid() || waiting_for_hello_;
-    ImGui::BeginDisabled(restarting || broker_.busy() || download_ticket_ || identify_ticket_ || browse_ticket_ || wav_ticket_);
-    if (ImGui::Button(ui_label("restart_engine"))) restart_engine();
     ImGui::EndDisabled();
     return changed;
 }
@@ -510,9 +696,9 @@ void Provider::draw_test_page() {
 
 void Provider::draw_tests() {
     window_.section_heading(tr("recognition_test"));
-    if (ImGui::Button(ui_label("check_microphone")))
-        request_microphone_panel();
-    const bool unavailable = !broker_.ready() || broker_.model_state() == XSR_MODEL_MISSING;
+    const bool engine_ready = broker_.service_ready();
+    const bool unavailable = !engine_ready || broker_.model_state() == XSL_MODEL_MISSING;
+    if (!engine_ready) ImGui::TextDisabled("%s", engine_state_label());
     ImGui::BeginDisabled(unavailable || wav_ticket_ || (broker_.busy() && !local_held_));
     ImGui::PushStyleColor(ImGuiCol_Button, primary_button);
     ImGui::Button(ui_label("hold_to_talk"), {-1, 40});
@@ -554,12 +740,11 @@ void Provider::draw_tests() {
             ImGui::TextWrapped("%s", test_source_label(test_source_));
         }
         ImGui::PopStyleColor();
-    } else if (test_status_ != XSR_OK) {
-        ImGui::TextWrapped("%s", activity_status(test_status_, XSR_STAGE_NONE, test_source_));
-    } else if (unavailable) {
-        ImGui::TextWrapped("%s", broker_.ready() ?
-            tr("test_requires_model") : status_label(engine_status_));
-    } else {
+    } else if (test_status_ != XSL_OK) {
+        ImGui::TextWrapped("%s", activity_status(test_status_, XSL_STAGE_NONE, test_source_));
+    } else if (unavailable && engine_ready) {
+        ImGui::TextWrapped("%s", tr("test_requires_model"));
+    } else if (engine_ready) {
         ImGui::TextDisabled("%s", tr("no_result_yet"));
     }
 }
@@ -606,7 +791,7 @@ void Provider::draw_recent_requests() {
             const auto phase = row.progress.phase();
             const char* state = activity_status(row.status, row.stage, row.source);
             if (row.pending) state = activity_phase_label(phase);
-            else if (row.status == XSR_OK)
+            else if (row.status == XSL_OK)
                 state = tr("transcribed");
             constexpr float source_emphasis = 2;
             const float source_scale = (ImGui::GetFontSize() + source_emphasis) / ImGui::GetFontSize();
@@ -618,7 +803,7 @@ void Provider::draw_recent_requests() {
             emphasized_text(source, source_emphasis);
             ImGui::PopStyleColor();
             if (source_width + state_width + 24 <= room) ImGui::SameLine(state_x);
-            ImVec4 state_color = row.status == XSR_OK ? green_text : amber_text;
+            ImVec4 state_color = row.status == XSL_OK ? green_text : amber_text;
             if (row.pending && phase == ActivityPhase::transcribing)
                 state_color = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
             else if (row.pending && phase != ActivityPhase::capturing)
@@ -641,9 +826,9 @@ void Provider::draw_recent_requests() {
                 ImGui::TextWrapped("%s · %s", duration, warm);
             }
             if (!row.model.empty()) {
-                const char* vocab = row.vocabulary == XSR_VOCAB_APPLIED ?
+                const char* vocab = row.vocabulary == XSL_VOCAB_APPLIED ?
                     tr("vocabulary_applied") :
-                    row.vocabulary == XSR_VOCAB_UNSUPPORTED ?
+                    row.vocabulary == XSL_VOCAB_UNSUPPORTED ?
                     tr("vocabulary_unsupported") :
                     tr("no_vocabulary");
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -659,24 +844,18 @@ void Provider::draw_recent_requests() {
 std::vector<std::pair<std::string, std::string>> Provider::diagnostic_fields() const {
     const auto& profile = broker_.settings().profile;
     const char* missing = tr("unavailable");
-    const auto engine_status = broker_.service_ready() ? XSR_OK :
-        broker_.ready() ? XSR_ENGINE_RESTARTING : engine_status_;
     const char* model_state = missing;
     switch (broker_.model_state()) {
-    case XSR_MODEL_READY: model_state = tr("loaded"); break;
-    case XSR_MODEL_LOADING: model_state = tr("loading"); break;
-    case XSR_MODEL_UNLOADED: model_state = tr("unloaded"); break;
+    case XSL_MODEL_READY: model_state = tr("loaded"); break;
+    case XSL_MODEL_LOADING: model_state = tr("loading"); break;
+    case XSL_MODEL_UNLOADED: model_state = tr("unloaded"); break;
     }
 
-    auto actual = broker_.model_state() == XSR_MODEL_READY ? broker_.actual_compute() : "";
+    auto actual = broker_.model_state() == XSL_MODEL_READY ? broker_.actual_compute() : "";
     if (actual.empty()) actual = missing;
     else if (broker_.cpu_fallback())
         actual += tr("cpu_fallback_suffix");
 
-    const auto& version = profile.moonshine_voice() ? moonshine_version_ :
-        profile.whisper_cpp() ? whisper_version_ : engine_version_;
-    const char* inference_engine = profile.moonshine_voice() ? "Moonshine Voice " :
-        profile.whisper_cpp() ? "whisper.cpp " : "transcribe.cpp ";
     std::string monitoring = missing;
     if (last_monitoring_.is_object()) {
         const auto mode = last_monitoring_.at("mode").get<std::string>();
@@ -694,22 +873,25 @@ std::vector<std::pair<std::string, std::string>> Provider::diagnostic_fields() c
             monitoring += detail;
         }
     }
-    return {
-        {"X-Speech Rekon", XSR_VERSION},
+    std::vector<std::pair<std::string, std::string>> fields = {
+        {"X-Speech Listen", XSL_VERSION},
         {"X-Plane / SDK", std::to_string(xplane_version_) + " / " + std::to_string(sdk_version_)},
-        {tr("engine"), status_label(engine_status)},
+        {tr("engine"), engine_state_label()},
         {tr("engine_version"),
-         version.empty() ? missing : inference_engine + version},
+         engine_version_.empty() ? missing : "transcribe.cpp " + engine_version_},
         {tr("model"),
-         profile.available() ? std::string(model_label(profile.id)) + " " + profile.quant : missing},
+         broker_.model_state() == XSL_MODEL_READY ? std::string(model_label(profile.id)) + " · " + profile.quant : missing},
         {tr("model_state"), model_state},
         {tr("selected_microphone"), microphone_label()},
         {tr("last_microphone_monitoring"), std::move(monitoring)},
-        {tr("requested_compute"), profile.moonshine_voice() ? "CPU" : compute_label(draft_.compute)},
+        {tr("requested_compute"), compute_label(draft_.compute)},
         {tr("effective_compute"), std::move(actual)},
         {tr("settings_storage"), writer_.failed() ?
             tr("write_failed_retrying") : "OK"},
     };
+    if (broker_.service_ready() && draft_.compute == "cpu")
+        fields.insert(fields.begin() + 4, {tr("cpu_threads"), std::to_string(broker_.settings().cpu_threads)});
+    return fields;
 }
 
 void Provider::draw_diagnostic() {
@@ -738,7 +920,7 @@ void Provider::draw_diagnostic() {
         clipboard_result_.reset();
         try {
             clipboard_copy_ = std::async(std::launch::async, [report = std::move(report)] {
-                return copy_diagnostic_text(report);
+                return copy_clipboard_text(report);
             });
         } catch (const std::system_error&) {
             clipboard_result_ = false;
@@ -785,4 +967,4 @@ void Provider::draw_diagnostic() {
     ImGui::EndChild();
 }
 
-} // namespace xsr
+} // namespace xsl

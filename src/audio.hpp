@@ -5,7 +5,7 @@
 #include <atomic>
 #include <thread>
 
-namespace xsr {
+namespace xsl {
 
 Json microphone_list();
 std::vector<float> read_wav(const fs::path& path);
@@ -18,7 +18,7 @@ struct Recording {
     const bool microphone_test;
     std::atomic<size_t> count{0};
     std::atomic<float> level{0};
-    std::atomic<uint32_t> error{XSR_OK};
+    std::atomic<uint32_t> error{XSL_OK};
     std::atomic<bool> closed{false};
     std::atomic<bool> disconnected{false};
 };
@@ -39,4 +39,4 @@ void record(Recording& target, const std::string& microphone, const fs::path& in
             const std::atomic<bool>& released, const std::atomic<bool>& cancelled,
             const std::function<void(float, bool, size_t, const std::string&, const CaptureMonitoring&)>& report);
 
-} // namespace xsr
+} // namespace xsl

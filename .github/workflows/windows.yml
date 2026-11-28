@@ -7,10 +7,6 @@ on:
         description: Download and test every catalog model variant
         type: boolean
         default: false
-      moonshine_voice:
-        description: Test Moonshine Voice Small and Medium on Windows
-        type: boolean
-        default: false
   push:
     branches: [main]
   pull_request:
@@ -53,31 +49,31 @@ jobs:
             '--default-answer', '--confirm-command', 'install') -Wait -PassThru
           if ($process.ExitCode -ne 0 -or !(Test-Path "$sdk\Bin\glslc.exe")) { throw 'Vulkan SDK installation failed' }
           "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
-          "XSR_WINDOWS_BUILD=$env:RUNNER_TEMP\xv" >> $env:GITHUB_ENV
+          "XSL_WINDOWS_BUILD=$env:RUNNER_TEMP\xv" >> $env:GITHUB_ENV
       - name: Configure, build and test
         shell: pwsh
         run: |
-          cmake -S . -B $env:XSR_WINDOWS_BUILD -G 'Visual Studio 17 2022' -A x64 -DXSR_VULKAN=ON
+          cmake -S . -B $env:XSL_WINDOWS_BUILD -G 'Visual Studio 17 2022' -A x64 -DXSL_VULKAN=ON
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build $env:XSR_WINDOWS_BUILD --config Release --parallel 2
+          cmake --build $env:XSL_WINDOWS_BUILD --config Release --parallel 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          ctest --test-dir $env:XSR_WINDOWS_BUILD -C Release --output-on-failure
+          ctest --test-dir $env:XSL_WINDOWS_BUILD -C Release --output-on-failure
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Assemble and inspect native package
         shell: pwsh
         env:
-          XSR_FULL_CATALOG: ${{ inputs.full_catalog }}
+          XSL_FULL_CATALOG: ${{ inputs.full_catalog }}
         run: |
-          $installLog = Join-Path $env:RUNNER_TEMP 'xsr-install.log'
-          cmake --install $env:XSR_WINDOWS_BUILD --config Release --prefix dist/stage --component xsr 2>&1 |
+          $installLog = Join-Path $env:RUNNER_TEMP 'xsl-install.log'
+          cmake --install $env:XSL_WINDOWS_BUILD --config Release --prefix dist/stage --component xsl 2>&1 |
             Tee-Object -FilePath $installLog
           if ($LASTEXITCODE) {
             Get-Content -LiteralPath $installLog -Tail 8 | ForEach-Object { Write-Output ('::error::' + $_) }
             exit $LASTEXITCODE
           }
           try {
-            .\cmake\package-windows.ps1 -RequireVulkan -FullCatalog:($env:XSR_FULL_CATALOG -eq 'true')
+            .\cmake\package-windows.ps1 -RequireVulkan -FullCatalog:($env:XSL_FULL_CATALOG -eq 'true')
           } catch {
             Write-Output ('::error::' + ($_.Exception.Message -replace '\r?\n', '%0A'))
             exit 1
@@ -86,78 +82,8 @@ jobs:
       - name: Upload installable archive and checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: X-Speech-Rekon-Windows-x86-64
+          name: X-Speech-Listen-Windows-x86-64
           path: |
-            dist/X-Speech-Rekon-Windows-x86-64.zip
-            dist/X-Speech-Rekon-Windows-x86-64.zip.sha256
-          if-no-files-found: error
-
-  moonshine-windows:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.moonshine_voice }}
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build with the official Moonshine SDK
-        shell: pwsh
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'moonshine.tar.gz'
-          $sdk = Join-Path $env:RUNNER_TEMP 'moonshine-voice-windows-x86_64'
-          $expected = '9e33fa88c1dd627314072ffe005af94888515c534cc599617462bc72ed3770f3'
-          Invoke-WebRequest -Uri 'https://github.com/moonshine-ai/moonshine/releases/download/v0.1.6/moonshine-voice-windows-x86_64.tar.gz' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) { throw 'Moonshine SDK hash mismatch' }
-          tar -xf $archive -C $env:RUNNER_TEMP
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          function Invoke-MoonshineCMake([string[]]$CMakeArgs) {
-            $log = Join-Path $env:RUNNER_TEMP 'xsr-moonshine-cmake.log'
-            & cmake @CMakeArgs 2>&1 | Tee-Object -FilePath $log
-            if ($LASTEXITCODE) {
-              $failure = $LASTEXITCODE
-              $errors = Select-String -LiteralPath $log -Pattern 'error [A-Z]+[0-9]+:|fatal error|CMake Error' |
-                Select-Object -Last 6 -ExpandProperty Line
-              if (!$errors) { $errors = Get-Content -LiteralPath $log -Tail 6 }
-              foreach ($line in $errors) { Write-Output ('::error::' + $line.Replace('%', '%25')) }
-              '### Moonshine build diagnostics' >> $env:GITHUB_STEP_SUMMARY
-              '```text' >> $env:GITHUB_STEP_SUMMARY
-              Get-Content -LiteralPath $log -Tail 60 >> $env:GITHUB_STEP_SUMMARY
-              '```' >> $env:GITHUB_STEP_SUMMARY
-              throw "CMake exited with code $failure"
-            }
-          }
-          Invoke-MoonshineCMake @('-S', '.', '-B', 'build/moonshine', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DXSR_MOONSHINE_SDK=$sdk")
-          Invoke-MoonshineCMake @('--build', 'build/moonshine', '--config', 'Release', '--parallel', '2')
-          ctest --test-dir build/moonshine -C Release --output-on-failure
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Test official weights with a WAV and simulated PTT
-        shell: pwsh
-        run: |
-          $stage = Join-Path $env:RUNNER_TEMP 'Essai Moonshine'
-          cmake --install build/moonshine --config Release --prefix $stage --component xsr
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          .\cmake\package-moonshine.ps1 -Stage $stage
-          $extracted = Join-Path $env:RUNNER_TEMP 'Vérification Moonshine'
-          Expand-Archive -LiteralPath dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip -DestinationPath $extracted
-          $plugin = Join-Path $extracted 'X-Speech-Rekon'
-          cmake "-DPLUGIN_DIR=$plugin" -P cmake/check-locales.cmake
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $engine = Join-Path $extracted 'X-Speech-Rekon/bin/xsr-engine.exe'
-          $check = Join-Path $extracted 'tools/xsr-check.exe'
-          $wav = Join-Path $extracted 'X-Speech-Rekon/test-en.wav'
-          $catalog = Join-Path $extracted 'X-Speech-Rekon/moonshine-catalog.json'
-          $models = Join-Path $env:RUNNER_TEMP 'Modèles Moonshine'
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            & $check --engine $engine --catalog $catalog --models $models --fetch
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq 3) { exit $LASTEXITCODE }
-            Start-Sleep -Seconds (5 * $attempt)
-          }
-          & $check --engine $engine --catalog $catalog --models $models --wav $wav
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Upload Moonshine experiment and checksum
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: X-Speech-Rekon-Moonshine-Windows-x86-64
-          path: |
-            dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip
-            dist/X-Speech-Rekon-Moonshine-Windows-x86-64.zip.sha256
+            dist/X-Speech-Listen-Windows-x86-64.zip
+            dist/X-Speech-Listen-Windows-x86-64.zip.sha256
           if-no-files-found: error

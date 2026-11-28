@@ -4,11 +4,11 @@
 #include <map>
 #include <string>
 
-namespace xsr {
+namespace xsl {
 
 // Private message exchanged only by the two UI modules on the simulator thread.
-inline constexpr int interface_language_message = 0x58535231;
-inline constexpr char diagnostic_signature[] = "wiksa.x-speech-rekon.diagnostic";
+inline constexpr int interface_language_message = 0x58534C31;
+inline constexpr char diagnostic_signature[] = "wiksa.x-speech-listen.diagnostic";
 
 class InterfaceLocale {
 public:
@@ -35,4 +35,4 @@ std::filesystem::path preferences_path();
 void initialize_interface(bool diagnostic);
 void copy_plugin_description(char* destination, const char* key);
 
-} // namespace xsr
+} // namespace xsl

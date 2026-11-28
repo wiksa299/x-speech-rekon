@@ -1,6 +1,6 @@
 #pragma once
 
-#include "xspeech_rekon.h"
+#include "xspeech_listen.h"
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -14,7 +14,7 @@
 #include <string_view>
 #include <vector>
 
-namespace xsr {
+namespace xsl {
 
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -27,13 +27,13 @@ constexpr int microphone_client = -3;
 constexpr uint32_t sample_rate = 16000;
 constexpr uint32_t max_samples = 30 * sample_rate;
 constexpr uint32_t microphone_test_seconds = 10;
-constexpr uint32_t max_result_size = XSR_MAX_TEXT_BYTES;
+constexpr uint32_t max_result_size = XSL_MAX_TEXT_BYTES;
+int default_cpu_threads(unsigned available);
 
 std::string status_name(uint32_t status);
 bool valid_utf8(std::string_view input);
 bool read_frame(std::istream& stream, Json& message);
 std::string wire_frame(const Json& message);
-fs::path executable_path(const char* argv0);
 
 class Process {
 public:
@@ -54,9 +54,9 @@ private:
 
 inline constexpr char parakeet_v2_id[] = "parakeet-tdt-0.6b-v2";
 inline constexpr char nemotron_id[] = "nemotron-3.5-asr-streaming-0.6b";
-inline constexpr char whisper_cpp_id[] = "whisper-small.en-whisper-cpp";
-inline constexpr char whisper_transcribe_id[] = "whisper-small.en-transcribe";
-inline constexpr size_t whisper_chunk_samples = 8000;
+inline constexpr char moonshine_small_id[] = "moonshine-streaming-small";
+inline constexpr char fluid_mini_id[] = "fluid-speech-mini";
+inline constexpr char fluid_pro_id[] = "fluid-speech-pro";
 
 struct Profile {
     std::string id;
@@ -66,18 +66,14 @@ struct Profile {
     std::string sha256;
     bool parakeet_v2() const { return id == parakeet_v2_id; }
     bool nemotron() const { return id == nemotron_id; }
-    bool moonshine_voice() const { return id == "moonshine-voice-small" || id == "moonshine-voice-medium"; }
-    bool whisper_cpp() const { return id == whisper_cpp_id; }
-    bool whisper() const { return whisper_cpp() || id == whisper_transcribe_id; }
-    bool supported() const {
-        return parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || nemotron() || whisper() || moonshine_voice() ||
-            id == "moonshine-streaming-tiny" || id == "moonshine-streaming-small" || id == "moonshine-streaming-medium";
-    }
-    bool english_only() const { return parakeet_v2() || whisper() || moonshine_voice() || (streaming() && !nemotron()); }
-    bool supports_vocabulary(bool early = false) const {
-        return whisper() || moonshine_voice() || parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || (nemotron() && !early);
-    }
-    bool streaming() const { return nemotron() || id.rfind("moonshine-streaming-", 0) == 0; }
+    bool moonshine_small() const { return id == moonshine_small_id; }
+    bool fluid() const { return id == fluid_mini_id || id == fluid_pro_id; }
+    bool supports_beam() const { return parakeet_v2() || id == "parakeet-tdt-0.6b-v3" || fluid(); }
+    bool supports_vocabulary_weight() const { return supports_beam() || moonshine_small(); }
+    bool supported() const { return supports_vocabulary_weight() || nemotron(); }
+    bool english_only() const { return parakeet_v2() || moonshine_small() || id == fluid_mini_id; }
+    bool supports_vocabulary(bool early = false) const { return supported() && !(early && streaming()); }
+    bool streaming() const { return nemotron() || moonshine_small(); }
     bool available() const { return !path.empty(); }
 };
 
@@ -92,10 +88,19 @@ struct Settings {
     LoadPolicy load = LoadPolicy::on_use;
     UnloadPolicy unload = UnloadPolicy::after_idle;
     int idle_minutes = 5;
+    int cpu_threads = 0;
+    int beam_width = 1;
+    std::optional<bool> vocabulary_enabled;
+    float vocabulary_weight = -1.0f;
     bool early = false;
     bool sidetone = false;
     bool low_latency_monitoring = false;
-    uint32_t monitor_gain_percent = XSR_DEFAULT_MONITOR_GAIN_PERCENT;
+    uint32_t monitor_gain_percent = XSL_DEFAULT_MONITOR_GAIN_PERCENT;
+
+    bool lexical_bias_enabled() const {
+        return vocabulary_enabled.value_or(!profile.moonshine_small()) &&
+            (!profile.supports_vocabulary_weight() || vocabulary_weight != 0.0f);
+    }
 };
 
 struct Delivery {
@@ -103,7 +108,7 @@ struct Delivery {
     uint32_t kind;
     uint32_t status;
     uint64_t session;
-    uint32_t stage = XSR_STAGE_NONE;
+    uint32_t stage = XSL_STAGE_NONE;
     Json result = Json::object();
 };
 
@@ -112,14 +117,14 @@ public:
     using Send = std::function<bool(const Json&)>;
     using Deliver = std::function<void(const Delivery&)>;
     Broker(Send send, Deliver deliver);
-    void request(int sender, XsrRequest& request, Clock::time_point now);
+    void request(int sender, XslRequest& request, Clock::time_point now);
     void accept(const Json& event, Clock::time_point now);
     void tick(Clock::time_point now);
     void set_settings(Settings settings, Clock::time_point now);
     void engine_online(Clock::time_point now);
     void restore_last_good(Profile profile) { last_good_ = std::move(profile); }
     const Profile& last_good() const { return last_good_; }
-    void engine_lost(Clock::time_point now);
+    void engine_lost(Clock::time_point now, uint32_t unavailable = XSL_ENGINE_RESTARTING);
     void shutdown(Clock::time_point now);
     void forget(int client, Clock::time_point now);
     uint32_t begin_local(std::string wav, Clock::time_point now, uint64_t& session);
@@ -131,6 +136,7 @@ public:
     bool busy() const { return active_.has_value(); }
     bool ready() const { return ready_; }
     bool service_ready() const { return ready_ && configuration_confirmed_ && !draining_session_; }
+    uint32_t service_status() const { return service_ready() ? uint32_t(XSL_OK) : engine_unavailable_; }
     bool restart_due(Clock::time_point now) const { return (draining_session_ && now >= drain_deadline_) ||
         (ready_ && !configuration_confirmed_ && now >= configure_deadline_); }
     uint32_t model_state() const { return model_state_; }
@@ -158,7 +164,7 @@ private:
     void abort_session(uint32_t status, uint32_t stage, Clock::time_point now);
     void recover_profile(Clock::time_point now);
     void unload(Clock::time_point now);
-    void status(XsrRequest&) const;
+    void status(XslRequest&) const;
 
     Send send_;
     Deliver deliver_;
@@ -170,7 +176,8 @@ private:
     Clock::time_point last_use_{};
     uint64_t next_session_ = 0;
     uint64_t generation_ = 0;
-    uint32_t model_state_ = XSR_MODEL_MISSING;
+    uint32_t model_state_ = XSL_MODEL_MISSING;
+    uint32_t engine_unavailable_ = XSL_ENGINE_RESTARTING;
     std::string actual_compute_;
     bool cpu_fallback_ = false;
     bool ready_ = false, configuration_confirmed_ = false;
@@ -179,4 +186,4 @@ private:
     Clock::time_point drain_deadline_{}, configure_deadline_{};
 };
 
-} // namespace xsr
+} // namespace xsl

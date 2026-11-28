@@ -4,7 +4,7 @@
 
 #include <algorithm>
 
-namespace xsr {
+namespace xsl {
 namespace {
 constexpr ImVec4 red_text{0.96f, 0.60f, 0.60f, 1};
 } // namespace
@@ -35,7 +35,7 @@ void Provider::update_micro_indicator() {
     micro_window_->set_drag_area(height);
     micro_window_->set_background_opacity(static_cast<float>(micro_opacity_) / 100.0f);
     micro_window_->set_border_opacity(static_cast<float>(micro_border_opacity_) / 100.0f);
-    if (!micro_window_->visible()) micro_window_->show("Rekon");
+    if (!micro_window_->visible()) micro_window_->show("Listen");
 }
 
 void Provider::draw_micro_settings() {
@@ -118,6 +118,15 @@ bool Provider::draw_microphone_selector() {
 void Provider::request_microphone_panel() {
     microphone_panel_requested_ = true;
     if (broker_.ready()) process_.send({{"type", "microphones"}});
+}
+
+void Provider::draw_microphone_button() {
+    const bool ready = broker_.service_ready();
+    ImGui::BeginDisabled(!ready);
+    if (ImGui::Button(ui_label("configure_microphone"))) request_microphone_panel();
+    if (!ready && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", engine_state_label());
+    ImGui::EndDisabled();
 }
 
 void Provider::clear_microphone_test() {
@@ -209,7 +218,7 @@ void Provider::draw_microphone_levels() {
     window_.section_heading(tr("capture_level"));
     const char* status = status_label(take.status);
     const char* guide = tr("microphone_test_instructions");
-    ImVec4 color = take.status == XSR_OK ? green_text : amber_text;
+    ImVec4 color = take.status == XSL_OK ? green_text : amber_text;
     if (take.capturing) {
         status = take.ending ? tr("finishing") :
             take.capture_ms ? tr("listening") :
@@ -220,6 +229,9 @@ void Provider::draw_microphone_levels() {
             guide = tr("speak_normally_as_in_flight");
         else
             guide = tr("speak_a_little_louder_now");
+    } else if (!broker_.service_ready()) {
+        status = engine_state_label();
+        color = ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
     } else if (take.has_take) {
         color = amber_text;
         if (take.clipped || take.peak >= -2) {
@@ -231,7 +243,7 @@ void Provider::draw_microphone_levels() {
             status = tr("test_too_short");
             guide = tr("repeat_the_test_and_speak_when_prompted");
         } else if (!take.rms) {
-            status = status_label(XSR_NO_SPEECH);
+            status = status_label(XSL_NO_SPEECH);
             guide = tr("check_input_permissions");
         } else if (*take.rms < -40 || take.peak < -30) {
             status = tr("signal_is_weak");
@@ -241,13 +253,13 @@ void Provider::draw_microphone_levels() {
             status = tr("good_level");
             guide = tr("your_voice_has_room_before_clipping");
         }
-    } else if (take.status == XSR_MIC_UNAVAILABLE || take.status == XSR_NO_AUDIO) {
+    } else if (take.status == XSL_MIC_UNAVAILABLE || take.status == XSL_NO_AUDIO) {
         guide = tr("check_input_permissions");
     } else if (broker_.busy()) {
-        status = status_label(XSR_BUSY);
+        status = status_label(XSL_BUSY);
         color = amber_text;
     } else if (!broker_.service_ready()) {
-        status = status_label(XSR_ENGINE_RESTARTING);
+        status = status_label(XSL_ENGINE_RESTARTING);
         color = amber_text;
     }
     ImGui::TextColored(color, "%s", status);
@@ -296,11 +308,11 @@ void Provider::draw_microphone_levels() {
                                       ui_label("start_test"))) {
         const auto now = Clock::now();
         if (take.capturing) {
-            take.ending = broker_.end_microphone_test(take.session, now) == XSR_OK;
+            take.ending = broker_.end_microphone_test(take.session, now) == XSL_OK;
         } else {
             clear_microphone_test();
             take.status = broker_.begin_microphone_test(now, take.session);
-            take.capturing = take.status == XSR_OK;
+            take.capturing = take.status == XSL_OK;
         }
     }
     ImGui::PopStyleColor();
@@ -311,4 +323,4 @@ void Provider::draw_microphone_levels() {
     else ImGui::TextDisabled("%u s", microphone_test_seconds);
 }
 
-} // namespace xsr
+} // namespace xsl

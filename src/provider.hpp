@@ -16,11 +16,11 @@
 #include <mutex>
 #include <thread>
 
-namespace xsr {
+namespace xsl {
 
 struct MicrophoneTest {
     uint64_t session = 0;
-    uint32_t status = XSR_OK, capture_ms = 0, clipped = 0;
+    uint32_t status = XSL_OK, capture_ms = 0, clipped = 0;
     float level = -120, peak = -120;
     std::optional<float> rms;
     std::string device;
@@ -69,8 +69,8 @@ struct Activity {
     uint64_t session;
     std::string name;
     uint32_t status;
-    uint32_t stage = XSR_STAGE_NONE;
-    uint32_t vocabulary = XSR_VOCAB_NONE;
+    uint32_t stage = XSL_STAGE_NONE;
+    uint32_t vocabulary = XSL_VOCAB_NONE;
     std::string model, quant, text;
     ActivityProgress progress;
     std::optional<uint32_t> latency_ms;
@@ -87,15 +87,20 @@ public:
     bool service_ready() const { return broker_.service_ready(); }
     int model_state() const { return static_cast<int>(broker_.model_state()); }
     bool ptt_busy() const { return broker_.busy(); }
-    void request(int sender, XsrRequest& command);
+    void request(int sender, XslRequest& command);
 
 private:
+    enum class EngineMode { enabled, suspended, disabled };
     static void menu_callback(void* owner, void*);
     static float tick_callback(float, float, int, void* owner);
-    void record_incident(uint32_t status, uint32_t stage = XSR_STAGE_NONE,
+    void record_incident(uint32_t status, uint32_t stage = XSL_STAGE_NONE,
                          TestSource source = TestSource::microphone);
     void engine_started(bool started, Clock::time_point now);
     void restart_engine(bool recovery = false);
+    void change_engine_mode(EngineMode mode);
+    void reset_engine(uint32_t status, Clock::time_point now);
+    bool engine_controls_busy() const;
+    const char* engine_state_label() const;
     void clear_file_requests();
     void notify_diagnostic(XPLMPluginID id);
     void refresh_language();
@@ -109,14 +114,16 @@ private:
 
     void load_catalog();
     void load_preferences();
+    std::string default_quantization_for(const std::string& model) const;
     static bool string_fields(const Json& value, std::initializer_list<const char*> fields);
     static bool valid_catalog_entry(const Json& entry);
     static Profile decode_profile(const Json& value);
     void save_preferences();
     bool file_request(FileRequest& pending, Json command, Clock::duration timeout);
     void scan();
+    void change_models_folder(std::string path, bool require_directory);
     void identify(const std::string& path);
-    std::string candidate_path() const;
+    std::string candidate_path(bool allow_previous = true) const;
     const Json* selected_entry() const;
     std::string compute_label(const std::string& id) const;
 
@@ -129,15 +136,20 @@ private:
     static constexpr ImVec4 primary_button{0.16f, 0.36f, 0.57f, 1};
 
     void draw();
-    void draw_models();
+    bool draw_engine_settings();
+    bool draw_models();
+    void draw_model_heading();
+    void draw_models_folder();
+    bool draw_model_memory();
+    bool draw_compute();
     bool draw_recognition_settings();
+    void draw_microphone_button();
     bool draw_microphone_selector();
     void draw_microphone_panel();
     void draw_microphone_levels();
     void request_microphone_panel();
     void close_microphone_panel();
     void clear_microphone_test();
-    bool draw_compute_and_memory();
     void draw_test_page();
     void draw_tests();
     void draw_activity();
@@ -152,9 +164,11 @@ private:
     std::vector<std::pair<std::string, std::string>> diagnostic_fields() const;
 
     fs::path root_, preferences_, folder_;
+    std::string folder_draft_;
+    std::optional<std::string> folder_change_;
     PreferencesWriter writer_;
     Process process_;
-    std::future<bool> engine_restart_;
+    std::future<bool> engine_transition_;
     Broker broker_;
     Window window_;
     std::unique_ptr<Window> micro_window_;
@@ -169,16 +183,21 @@ private:
     std::future<bool> clipboard_copy_;
     std::optional<bool> clipboard_result_;
     int xplane_version_ = 0, sdk_version_ = 0;
+    EngineMode engine_mode_ = EngineMode::enabled;
+    int available_cpu_threads_ = 1, requested_cpu_threads_ = 1;
+    bool manually_restarting_ = false;
     uint64_t activity_sequence_ = 0;
     std::vector<Delivery> pending_events_;
     Json catalog_ = Json::array(), models_ = Json::array(), microphones_ = Json::array(), compute_devices_ = Json::array();
     Settings draft_;
-    std::string selected_id_ = "parakeet-tdt-0.6b-v3", selected_quant_ = "Q8_0";
-    std::string startup_path_, persisted_profile_, download_state_, test_text_, engine_version_, moonshine_version_, whisper_version_;
+    int idle_minutes_draft_ = draft_.idle_minutes;
+    std::string selected_id_ = "parakeet-tdt-0.6b-v3", selected_quant_;
+    std::string startup_path_, persisted_profile_, download_state_, test_text_, engine_version_;
     std::string persisted_good_path_, persisted_good_hash_;
     uint64_t next_ticket_ = 0, downloaded_ = 0, download_total_ = 0, test_session_ = 0;
     FileRequest scan_ticket_, identify_ticket_, browse_ticket_, download_ticket_, wav_ticket_;
-    uint32_t engine_status_ = XSR_ENGINE_RESTARTING, test_status_ = XSR_OK;
+    uint32_t engine_status_ = XSL_ENGINE_RESTARTING, test_status_ = XSL_OK;
+    const char* engine_failure_ = nullptr;
     TestSource test_source_ = TestSource::microphone;
     std::optional<uint32_t> test_latency_ms_;
     bool wav_picker_failed_ = false, folder_picker_failed_ = false, scan_error_ = false, catalog_error_ = false;
@@ -193,4 +212,4 @@ private:
     Clock::time_point retry_at_{}, hello_deadline_{}, preferences_retry_at_{};
 };
 
-} // namespace xsr
+} // namespace xsl

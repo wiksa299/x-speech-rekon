@@ -1,5 +1,5 @@
 #pragma once
 
-namespace xsr {
-inline constexpr char built_in_model_catalog[] = R"xsrcatalog(@xsr_model_catalog@)xsrcatalog";
-} // namespace xsr
+namespace xsl {
+inline constexpr char built_in_model_catalog[] = R"xsrcatalog(@xsl_model_catalog@)xsrcatalog";
+} // namespace xsl

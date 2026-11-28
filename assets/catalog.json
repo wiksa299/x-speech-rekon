@@ -1,35 +1,14 @@
 [
   {
-    "id": "moonshine-streaming-tiny",
-    "quant": "Q8_0",
-    "revision": "4125c28c22a76494162094ab3566387cd92fb2f5",
-    "file": "moonshine-streaming-tiny-Q8_0.gguf",
-    "bytes": 50462816,
-    "sha256": "930e4622ad3a24158b91406c30c977fa6a26b34cb32d6ac3e57cfb23383a869e",
-    "urls": [
-      "https://huggingface.co/handy-computer/moonshine-streaming-tiny-gguf/resolve/4125c28c22a76494162094ab3566387cd92fb2f5/moonshine-streaming-tiny-Q8_0.gguf"
-    ]
-  },
-  {
     "id": "moonshine-streaming-small",
     "quant": "Q8_0",
     "revision": "e53f28b0cb90308390c852068b950a1aadd238b0",
     "file": "moonshine-streaming-small-Q8_0.gguf",
     "bytes": 198506848,
+    "peak_cpu_ram_mib": 430,
     "sha256": "d03670f69629b649085d0f44a63d97668b4119117cc9611a4e4ad94341713dfc",
     "urls": [
       "https://huggingface.co/handy-computer/moonshine-streaming-small-gguf/resolve/e53f28b0cb90308390c852068b950a1aadd238b0/moonshine-streaming-small-Q8_0.gguf"
-    ]
-  },
-  {
-    "id": "moonshine-streaming-medium",
-    "quant": "Q8_0",
-    "revision": "56302cde2ae162d1357a833d91775bcd06e91e1b",
-    "file": "moonshine-streaming-medium-Q8_0.gguf",
-    "bytes": 295793568,
-    "sha256": "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
-    "urls": [
-      "https://huggingface.co/handy-computer/moonshine-streaming-medium-gguf/resolve/56302cde2ae162d1357a833d91775bcd06e91e1b/moonshine-streaming-medium-Q8_0.gguf"
     ]
   },
   {
@@ -38,6 +17,7 @@
     "revision": "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
     "file": "parakeet-tdt-0.6b-v2-Q4_K_M.gguf",
     "bytes": 475491840,
+    "peak_cpu_ram_mib": 872,
     "sha256": "4853f9653f641d376e6f7de65d73c7a34a73677704a606727bf51acc83f999f3",
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q4_K_M.gguf"
@@ -49,6 +29,7 @@
     "revision": "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
     "file": "parakeet-tdt-0.6b-v2-Q6_K.gguf",
     "bytes": 600408576,
+    "peak_cpu_ram_mib": 993,
     "sha256": "44c7c363438e03b613cf8ced8b7e6fd1beb2b3805008136fe5e922ab3c79eea9",
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q6_K.gguf"
@@ -60,6 +41,7 @@
     "revision": "58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb",
     "file": "parakeet-tdt-0.6b-v2-Q8_0.gguf",
     "bytes": 729574912,
+    "peak_cpu_ram_mib": 1116,
     "sha256": "f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa",
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v2-gguf/resolve/58239cf6d0ecb0af921e7936c1e5e0a8dba91dbb/parakeet-tdt-0.6b-v2-Q8_0.gguf"
@@ -71,6 +53,7 @@
     "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
     "file": "parakeet-tdt-0.6b-v3-Q4_K_M.gguf",
     "bytes": 485425504,
+    "peak_cpu_ram_mib": 914,
     "sha256": "b68557be1e3c40207fd7c4bd9d63f1d3316b963f15325bfb0cc16a8bb0ffd181",
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q4_K_M.gguf"
@@ -82,6 +65,7 @@
     "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
     "file": "parakeet-tdt-0.6b-v3-Q6_K.gguf",
     "bytes": 610342240,
+    "peak_cpu_ram_mib": 1033,
     "sha256": "ab1bbcbe3e1c4c2ec12ca1df1aeafd22e9043ce7262e4b5f5c5d7d76418a9ae8",
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q6_K.gguf"
@@ -93,6 +77,7 @@
     "revision": "d8d8c32cb2017c57e5307767343e97870f8a7f53",
     "file": "parakeet-tdt-0.6b-v3-Q8_0.gguf",
     "bytes": 739508576,
+    "peak_cpu_ram_mib": 1157,
     "sha256": "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
     "urls": [
       "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/d8d8c32cb2017c57e5307767343e97870f8a7f53/parakeet-tdt-0.6b-v3-Q8_0.gguf"
@@ -104,6 +89,7 @@
     "revision": "53ce288f69326b415aeef030cfcb02a08a8096dd",
     "file": "nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf",
     "bytes": 495831520,
+    "peak_cpu_ram_mib": 968,
     "sha256": "41c99fa5fb6f3d35f68e79adc3e755eca2232a8d921178bd647b71194792b8fd",
     "urls": [
       "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q4_K_M.gguf"
@@ -115,6 +101,7 @@
     "revision": "53ce288f69326b415aeef030cfcb02a08a8096dd",
     "file": "nemotron-3.5-asr-streaming-0.6b-Q6_K.gguf",
     "bytes": 621356512,
+    "peak_cpu_ram_mib": 1087,
     "sha256": "4ff802c6207c4a7df23242003fd2aa849a1ab02bba6bc80c3db02e7e82606c28",
     "urls": [
       "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q6_K.gguf"
@@ -126,31 +113,39 @@
     "revision": "53ce288f69326b415aeef030cfcb02a08a8096dd",
     "file": "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
     "bytes": 751094240,
+    "peak_cpu_ram_mib": 1211,
     "sha256": "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
     "urls": [
       "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/53ce288f69326b415aeef030cfcb02a08a8096dd/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
     ]
   },
   {
-    "id": "whisper-small.en-whisper-cpp",
-    "quant": "Q8_0",
-    "revision": "0b364b566045a405be7225ee1e415a073e04da77",
-    "file": "ggml-small.en-q8_0.bin",
-    "bytes": 264477561,
-    "sha256": "67a179f608ea6114bd3fdb9060e762b588a3fb3bd00c4387971be4d177958067",
+    "id": "fluid-speech-mini",
+    "quant": "Q2_K/Q4_K",
+    "revision": "490bcd5de891f5efd0e732434dfb0a4b0899aead",
+    "file": "fluid-speech-mini-q2k-q4k.gguf",
+    "bytes": 347357184,
+    "peak_cpu_ram_mib": 492,
+    "sha256": "f0796bf40274cc49d3db58563c23cd024b52ca7e2ae4749ccf27af85841726b5",
     "urls": [
-      "https://huggingface.co/ggerganov/whisper.cpp/resolve/0b364b566045a405be7225ee1e415a073e04da77/ggml-small.en-q8_0.bin"
+      "https://huggingface.co/FluidVoice-Labs/fluid-speech-mini-gguf/resolve/490bcd5de891f5efd0e732434dfb0a4b0899aead/fluid-speech-mini-q2k-q4k.gguf"
     ]
   },
   {
-    "id": "whisper-small.en-transcribe",
+    "id": "fluid-speech-pro",
     "quant": "Q8_0",
-    "revision": "10f027ec80d201b544a06bb67d5db1d5737aa8a1",
-    "file": "whisper-small.en-Q8_0.gguf",
-    "bytes": 269674144,
-    "sha256": "9614e6b7fda2d26018e4f268aece8ca25a83296ea0b534169a585b740bfd71ef",
+    "revision": "7318433d936a85d496c9204cc5a7aeb5c3021476",
+    "file": "fluid-speech-pro-crispasr-q8_0.gguf",
+    "bytes": 676653088,
+    "peak_cpu_ram_mib": 809,
+    "sha256": "96899b633f7513ce5ad95fa74ee39d3c5f60ab6a00b8d4472c9d154e848efb98",
     "urls": [
-      "https://huggingface.co/handy-computer/whisper-small.en-gguf/resolve/10f027ec80d201b544a06bb67d5db1d5737aa8a1/whisper-small.en-Q8_0.gguf"
-    ]
+      "https://huggingface.co/cstr/fluid-speech-pro-GGUF/resolve/7318433d936a85d496c9204cc5a7aeb5c3021476/fluid-speech-pro-q8_0.gguf"
+    ],
+    "previous": {
+      "revision": "fee970d9ac83f6d236632d39b67cbec12f5a9020",
+      "bytes": 940663968,
+      "sha256": "1b9c613fe3b058895885105e696c203a1a0b47c37eace80d18b51e20dcdc5ffd"
+    }
   }
 ]

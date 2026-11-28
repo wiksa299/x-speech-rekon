@@ -1,7 +1,0 @@
-#pragma once
-
-namespace xsr {
-inline constexpr char moonshine_catalog_json[] = R"xsr(
-@XSR_MOONSHINE_CATALOG@
-)xsr";
-}

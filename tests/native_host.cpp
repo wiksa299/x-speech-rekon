@@ -20,7 +20,9 @@
 #include <stdexcept>
 #include <thread>
 
-using namespace xsr;
+using namespace xsl;
+
+static_assert(XSL_ABI_VERSION == 1u);
 
 int locale_test_engine();
 
@@ -52,6 +54,8 @@ std::string delivered_text, delivered_language;
 uint64_t captured_session = 0, delivered_session = 0;
 int current = 0, drawn = 0;
 int vertices = 0, mouse_x = 0, mouse_y = 0;
+XPLMWindowID keyboard_window = nullptr;
+int settings_min_width = 0;
 std::string prefs;
 auto started = Clock::now();
 XPLMLanguageCode language = xplm_Language_French;
@@ -132,21 +136,21 @@ void wait_for_engine(bool pump_diagnostic = false) {
     do {
         pump(1);
         if (pump_diagnostic) pump(2);
-        if (read_dataref(XSR_DATAREF_SERVICE_READY)) return;
+        if (read_dataref(XSL_DATAREF_SERVICE_READY)) return;
         std::this_thread::sleep_for(10ms);
     } while (Clock::now() < limit);
     require(false, "engine became ready");
 }
 
-XsrRequest ptt_from_diagnostic(uint32_t operation = XSR_PTT_BEGIN, uint64_t session = 0) {
-    AsPlugin as(2);
-    XsrRequest request{};
-    request.version = XSR_ABI_VERSION;
+XslRequest provider_request(uint32_t operation = XSL_PTT_BEGIN, uint64_t session = 0, int sender = 2) {
+    AsPlugin as(sender);
+    XslRequest request{};
+    request.version = XSL_ABI_VERSION;
     request.struct_size = sizeof(request);
     request.operation = operation;
     request.session = session;
-    request.status = XSR_SERVICE_UNAVAILABLE;
-    XPLMSendMessageToPlugin(1, XSR_MESSAGE_REQUEST, &request);
+    request.status = XSL_SERVICE_UNAVAILABLE;
+    XPLMSendMessageToPlugin(1, XSL_MESSAGE_REQUEST, &request);
     return request;
 }
 } // namespace
@@ -169,10 +173,10 @@ void XPLMEnableFeature(const char*, int) {}
 void XPLMSendMessageToPlugin(XPLMPluginID id, int message, void* parameter) {
     if (!XPLMIsPluginEnabled(id)) return;
     const int sender = current;
-    if (id == 2 && sender == 1 && message == XSR_MESSAGE_EVENT) {
-        const auto& event = *static_cast<const XsrEvent*>(parameter);
-        if (event.kind == XSR_CAPTURE_STARTED) captured_session = event.session;
-        if (event.kind == XSR_RESULT && event.status == XSR_OK) {
+    if (id == 2 && sender == 1 && message == XSL_MESSAGE_EVENT) {
+        const auto& event = *static_cast<const XslEvent*>(parameter);
+        if (event.kind == XSL_CAPTURE_STARTED) captured_session = event.session;
+        if (event.kind == XSL_RESULT && event.status == XSL_OK) {
             delivered_session = event.session;
             delivered_text = event.text;
             delivered_language = event.language;
@@ -250,6 +254,13 @@ int XPLMGetWindowIsVisible(XPLMWindowID id) { return reinterpret_cast<XPLMCreate
 void XPLMSetWindowIsVisible(XPLMWindowID id, int visible) { reinterpret_cast<XPLMCreateWindow_t*>(id)->visible = visible; }
 void XPLMBringWindowToFront(XPLMWindowID) {}
 void XPLMSetWindowTitle(XPLMWindowID, const char*) {}
+void XPLMTakeKeyboardFocus(XPLMWindowID id) {
+    if (keyboard_window && keyboard_window != id) {
+        auto& window = *reinterpret_cast<XPLMCreateWindow_t*>(keyboard_window);
+        window.handleKeyFunc(id, 0, 0, 0, window.refcon, 1);
+    }
+    keyboard_window = id;
+}
 void XPLMGetWindowGeometry(XPLMWindowID id, int* left, int* top, int* right, int* bottom) {
     const auto& w = *reinterpret_cast<XPLMCreateWindow_t*>(id);
     *left = w.left; *top = w.top; *right = w.right; *bottom = w.bottom;
@@ -258,7 +269,10 @@ void XPLMSetWindowGeometry(XPLMWindowID id, int left, int top, int right, int bo
     auto& w = *reinterpret_cast<XPLMCreateWindow_t*>(id);
     w.left = left; w.top = top; w.right = right; w.bottom = bottom;
 }
-void XPLMSetWindowResizingLimits(XPLMWindowID, int, int, int, int) {}
+void XPLMSetWindowResizingLimits(XPLMWindowID id, int minimum_width, int, int, int) {
+    if (current == 1 && id == reinterpret_cast<XPLMWindowID>(&plugins[1].window))
+        settings_min_width = minimum_width;
+}
 void* XPLMCreateTexture(const unsigned char* rgba, int width, int height) {
     require(rgba && width > 0 && height > 0, "font atlas");
     return &plugins[current];
@@ -279,7 +293,7 @@ void XPLMDrawCalls(const XPLMMesh_t* mesh, int count, const XPLMDrawCall_t* comm
 
 int main(int argc, char** argv) {
     try {
-        if (fs::path(argv[0]).filename() == "xsr-engine") return locale_test_engine();
+        if (fs::path(argv[0]).filename() == "xsl-engine") return locale_test_engine();
         if (argc == 2 && std::string_view(argv[1]) == "--resize-grips") {
             Window floating([] {}, 365, 400, {}, xplm_WindowDecorationSelfDecorated);
             floating.enable_resize_grips();
@@ -309,7 +323,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         require(argc == 5, "provider diagnostic engine catalog");
-        const auto root = fs::temp_directory_path() / ("xsr-native-" + std::to_string(
+        const auto root = fs::temp_directory_path() / ("xsl-native-" + std::to_string(
             Clock::now().time_since_epoch().count()));
         struct Fixture {
             fs::path root;
@@ -317,7 +331,7 @@ int main(int argc, char** argv) {
         } fixture{root};
         fs::create_directories(root / "bin");
         const bool locale_test = std::string_view(argv[3]) == "--locale-ptt";
-        fs::create_symlink(fs::absolute(locale_test ? argv[0] : argv[3]), root / "bin/xsr-engine");
+        fs::create_symlink(fs::absolute(locale_test ? argv[0] : argv[3]), root / "bin/xsl-engine");
         fs::copy(fs::path(argv[4]).parent_path() / "locales", root / "locales", fs::copy_options::recursive);
         fs::copy_file(argv[4], root / "catalog.json");
         fs::copy_file(fs::path(argv[4]).parent_path() / "NotoSans-Regular.ttf", root / "NotoSans-Regular.ttf");
@@ -367,9 +381,9 @@ int main(int argc, char** argv) {
                 } while (Clock::now() < limit);
                 require(false, message);
             };
-            until([] { return read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_READY; }, "fixture model ready");
-            const auto session = ptt_from_diagnostic();
-            require(session.status == XSR_OK, "PTT accepted");
+            until([] { return read_dataref(XSL_DATAREF_MODEL_STATE) == XSL_MODEL_READY; }, "fixture model ready");
+            const auto session = provider_request();
+            require(session.status == XSL_OK, "PTT accepted");
             until([&] { return captured_session == session.session; }, "capture started");
             language = xplm_Language_Italian;
             draw(1);
@@ -379,16 +393,16 @@ int main(int argc, char** argv) {
             settings_window.bottom = settings_window.top - 1800;
             draw(1);
             draw(1);
-            click(80, 1193);
+            click(80, 1475);
             draw(1);
-            click(80, 1313); // Français in the expanded interface-language selector.
+            click(100, 1586); // Français in the expanded interface-language selector.
             require(menu_labels[1] == "Réglages" && menu_labels[2] == "Afficher le diagnostic", "manual override reaches both plugins");
             language = xplm_Language_English;
             draw(1);
             draw(2);
             require(menu_labels[1] == "Réglages" && menu_labels[2] == "Afficher le diagnostic", "override survives simulator language change");
-            require(read_dataref(XSR_DATAREF_PTT_BUSY) && read_dataref(XSR_DATAREF_SERVICE_READY), "PTT survives UI change");
-            require(ptt_from_diagnostic(XSR_PTT_END, session.session).status == XSR_OK, "release original PTT");
+            require(read_dataref(XSL_DATAREF_PTT_BUSY) && read_dataref(XSL_DATAREF_SERVICE_READY), "PTT survives UI change");
+            require(provider_request(XSL_PTT_END, session.session).status == XSL_OK, "release original PTT");
             until([&] { return delivered_session == session.session; }, "original subscriber received the result");
             require(delivered_text == "Heading select." && delivered_language == "en", "transcript and ASR language preserved");
             for (int id : {2, 1}) {
@@ -398,7 +412,7 @@ int main(int argc, char** argv) {
                 plugins[id].stop();
                 dlclose(plugins[id].library);
             }
-            auto saved = Json::parse(std::ifstream(root / "x-speech-rekon.json"));
+            auto saved = Json::parse(std::ifstream(root / "x-speech-listen.json"));
             require(saved.at("interface_language") == "fr" && saved.at("language") == "auto", "UI preference stored independently");
             load(1, argv[1], root / "64/lin.xpl");
             require(menu_labels[1] == "Réglages", "manual language restored on reload");
@@ -412,23 +426,30 @@ int main(int argc, char** argv) {
             return 0;
         }
         const auto copy_tool = root / "bin/wl-copy";
-        std::ofstream(copy_tool) << "#!/bin/sh\ncat > \"$XSR_TEST_CLIPBOARD\"\n";
+        std::ofstream(copy_tool) << "#!/bin/sh\ncat > \"$XSL_TEST_CLIPBOARD\"\n";
         fs::permissions(copy_tool, fs::perms::owner_exec, fs::perm_options::add);
+        const auto paste_tool = root / "bin/wl-paste";
+        std::ofstream(paste_tool) << "#!/bin/sh\nsleep 0.05\ncat \"$XSL_TEST_CLIPBOARD\"\n";
+        fs::permissions(paste_tool, fs::perms::owner_exec, fs::perm_options::add);
         const auto clipboard = root / "clipboard.txt";
         const char* inherited_path = std::getenv("PATH");
         const auto tool_path = (root / "bin").string() + ":" + (inherited_path ? inherited_path : "");
         require(setenv("PATH", tool_path.c_str(), 1) == 0 &&
-                setenv("WAYLAND_DISPLAY", "xsr-test", 1) == 0 &&
-                setenv("XSR_TEST_CLIPBOARD", clipboard.c_str(), 1) == 0, "isolated clipboard fixture");
+                setenv("WAYLAND_DISPLAY", "xsl-test", 1) == 0 &&
+                setenv("XSL_TEST_CLIPBOARD", clipboard.c_str(), 1) == 0, "isolated clipboard fixture");
 
         load(1, argv[1], root / "64/lin.xpl");
         load(2, argv[2], root / "diagnostic/64/lin.xpl");
+        require(plugins[1].title == "X-Speech Listen" && plugins[2].title == "X-Speech Listen Diagnostic",
+                "providers advertise the new product name");
+        require(plugins[1].signature == "wiksa.x-speech-listen",
+                "clients discover Listen by its public provider signature");
         require(menu_labels[1] == "Réglages" && menu_labels[2] == "Afficher le diagnostic", "French menus");
         require(datarefs.size() == 3, "published datarefs");
-        require(!read_dataref(XSR_DATAREF_SERVICE_READY), "offline before first engine handshake");
+        require(!read_dataref(XSL_DATAREF_SERVICE_READY), "offline before first engine handshake");
         wait_for_engine(true);
-        require(read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_MISSING &&
-                !read_dataref(XSR_DATAREF_PTT_BUSY), "ready engine with no model or PTT");
+        require(read_dataref(XSL_DATAREF_MODEL_STATE) == XSL_MODEL_MISSING &&
+                !read_dataref(XSL_DATAREF_PTT_BUSY), "ready engine with no model or PTT");
         draw(1);
         language = xplm_Language_English;
         draw(1);
@@ -436,19 +457,20 @@ int main(int argc, char** argv) {
         auto& provider_window = plugins[1].window;
         const int default_right = provider_window.right;
         const int default_bottom = provider_window.bottom;
-        require(default_right - provider_window.left == 620, "compact provider window");
-        provider_window.right = provider_window.left + 560;
+        require(default_right - provider_window.left == 660 && provider_window.top - default_bottom == 610 &&
+                settings_min_width == 480, "settings use the same initial and minimum sizes as X-Speech Speak");
+        provider_window.right = provider_window.left + settings_min_width;
         provider_window.bottom = provider_window.top - 460;
         draw(1);
         draw(2);
         require(menu_labels[1] == "Ajustes" && menu_labels[2] == "Mostrar diagnóstico", "menus follow simulator language");
         language = xplm_Language_English;
         draw(1);
-        click(172, 49);
+        click(172, 28);
         vertices = 0;
         draw(1);
         const int empty_activity = vertices;
-        require(ptt_from_diagnostic().status == XSR_MODEL_UNAVAILABLE, "diagnostic subscribed to provider");
+        require(provider_request().status == XSL_MODEL_UNAVAILABLE, "diagnostic subscribed to provider");
         {
             AsPlugin as(2);
             require(plugins[2].command != nullptr, "assignable command");
@@ -459,9 +481,9 @@ int main(int argc, char** argv) {
         vertices = 0;
         draw(1);
         require(vertices > empty_activity, "Activity displays rejected requests");
-        click(248, 49);
+        click(248, 28);
         draw(1);
-        click(93, 91);
+        click(93, 68);
         const auto copy_deadline = Clock::now() + 2s;
         std::string report;
         do {
@@ -475,21 +497,114 @@ int main(int argc, char** argv) {
                 report.find(root.string()) == std::string::npos, "copied diagnostics contain only technical data");
         provider_window.right = default_right;
         provider_window.bottom = default_bottom;
-        click(48, 50);
+        click(48, 28);
         draw(1);
-        click(99, 590);
-        require(!read_dataref(XSR_DATAREF_SERVICE_READY), "manual restart marks service offline");
+        click(320, 111); // Restart engine.
+        require(!read_dataref(XSL_DATAREF_SERVICE_READY), "manual restart marks service offline");
         wait_for_engine();
-        require(read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_MISSING &&
-                !read_dataref(XSR_DATAREF_PTT_BUSY), "idle after restart");
+        require(read_dataref(XSL_DATAREF_MODEL_STATE) == XSL_MODEL_MISSING &&
+                !read_dataref(XSL_DATAREF_PTT_BUSY), "idle after restart");
         provider_window.right = provider_window.left + 560;
         provider_window.bottom = provider_window.top - 460;
-        click(172, 49);
+        click(172, 28);
         draw(1);
         vertices = 0;
         draw(1);
         require(vertices > empty_activity, "manual restart preserves activity");
-        require(ptt_from_diagnostic().status == XSR_MODEL_UNAVAILABLE, "manual restart preserves subscription");
+        require(provider_request().status == XSL_MODEL_UNAVAILABLE, "manual restart preserves subscription");
+
+        provider_window.right = default_right;
+        provider_window.bottom = provider_window.top - 810;
+        click(48, 28);
+        click(100, 715); // Models folder text field.
+        draw(1);
+        const auto window_id = reinterpret_cast<XPLMWindowID>(&provider_window);
+        require(keyboard_window == window_id, "models folder field captures keyboard focus");
+        const auto key = [&](char character, XPLMKeyFlags flags, char virtual_key = 0) {
+            provider_window.handleKeyFunc(window_id, character, flags, virtual_key, provider_window.refcon, 0);
+        };
+        key(0, xplm_ControlFlag | xplm_DownFlag, 'A');
+        draw(1);
+        key(0, xplm_UpFlag, 'A');
+        const auto model_folder = root / fs::u8path(u8"Modèles 東京");
+        fs::create_directory(model_folder);
+        std::ofstream(clipboard) << model_folder.u8string();
+        const auto paste = [&] {
+            key(0, xplm_ControlFlag | xplm_DownFlag, 'V');
+            key(0, xplm_UpFlag, 'V');
+        };
+        const auto draw_while_pasting = [&] {
+            for (int frame = 0; frame < 30; ++frame) {
+                std::this_thread::sleep_for(10ms);
+                draw(1);
+            }
+        };
+        paste();
+        draw_while_pasting();
+        std::ofstream(clipboard) << "Discard this text after switching tabs";
+        paste();
+        click(172, 28); // Switch tabs before the clipboard tool returns.
+        draw_while_pasting();
+        require(!keyboard_window, "switching tabs releases keyboard focus");
+        click(48, 28);
+        click(100, 715); // Field has the same position while the draft differs.
+        key(0, xplm_ControlFlag | xplm_DownFlag, 'A');
+        draw(1);
+        key(0, xplm_UpFlag, 'A');
+        fs::remove(clipboard);
+        key(0, xplm_ControlFlag | xplm_DownFlag, 'C');
+        draw(1);
+        key(0, xplm_UpFlag, 'C');
+        const auto copy_field_deadline = Clock::now() + 2s;
+        std::string copied_path;
+        do {
+            draw(1);
+            std::ifstream file(clipboard);
+            copied_path.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            if (copied_path == model_folder.u8string()) break;
+            std::this_thread::sleep_for(10ms);
+        } while (Clock::now() < copy_field_deadline);
+        require(copied_path == model_folder.u8string(), "folder clipboard preserves Unicode and ignores a paste after focus loss");
+        click(52, 778); // Apply is below the active path shown while editing.
+        draw(1);
+        require(!keyboard_window, "applying models folder releases keyboard focus");
+        const auto wait_for_folder = [&](const fs::path& expected) {
+            const auto deadline = Clock::now() + 2s;
+            do {
+                pump(1);
+                const auto saved = Json::parse(std::ifstream(root / "x-speech-listen.json"), nullptr, false);
+                if (saved.is_object() && saved.value("folder", "") == expected.u8string()) return;
+                std::this_thread::sleep_for(10ms);
+            } while (Clock::now() < deadline);
+            require(false, "models folder preference saved");
+        };
+        wait_for_folder(model_folder);
+        click(201, 758); // Use default on Linux, where Browse is absent.
+        wait_for_folder(root / "models");
+
+        click(180, 111); // Suspend.
+        require(!read_dataref(XSL_DATAREF_SERVICE_READY) &&
+                provider_request().status == XSL_ENGINE_SUSPENDED,
+                "suspending the live engine blocks PTT without dropping the subscription");
+        const auto resume_deadline = Clock::now() + 3s;
+        do {
+            pump(1);
+            if (provider_request(XSL_GET_STATUS).service_status == XSL_ENGINE_SUSPENDED)
+                click(180, 111); // Resume once the engine has stopped.
+            if (read_dataref(XSL_DATAREF_SERVICE_READY)) break;
+            std::this_thread::sleep_for(10ms);
+        } while (Clock::now() < resume_deadline);
+        require(read_dataref(XSL_DATAREF_SERVICE_READY) && provider_request().status == XSL_MODEL_UNAVAILABLE,
+                "resumed engine retains the same subscriber");
+
+        const auto disable_deadline = Clock::now() + 3s;
+        do {
+            pump(1);
+            click(55, 111); // Disable engine once the startup scan has finished.
+            if (provider_request(XSL_GET_STATUS).service_status == XSL_ENGINE_DISABLED) break;
+            std::this_thread::sleep_for(10ms);
+        } while (Clock::now() < disable_deadline);
+        require(provider_request().status == XSL_ENGINE_DISABLED, "disabled engine rejects PTT");
 
         for (int id : {1, 2}) {
             AsPlugin as(id);
@@ -497,9 +612,9 @@ int main(int argc, char** argv) {
             plug.disable();
             plug.enabled = false;
             if (id == 1) {
-                require(datarefs.size() == 3 && !read_dataref(XSR_DATAREF_SERVICE_READY) &&
-                        read_dataref(XSR_DATAREF_MODEL_STATE) == XSR_MODEL_MISSING &&
-                        !read_dataref(XSR_DATAREF_PTT_BUSY), "disabled provider reports defaults");
+                require(datarefs.size() == 3 && !read_dataref(XSL_DATAREF_SERVICE_READY) &&
+                        read_dataref(XSL_DATAREF_MODEL_STATE) == XSL_MODEL_MISSING &&
+                        !read_dataref(XSL_DATAREF_PTT_BUSY), "disabled provider reports defaults");
             }
             plug.stop();
             require(datarefs.empty(), "datarefs unregistered at stop");
@@ -507,9 +622,20 @@ int main(int argc, char** argv) {
             dlclose(plug.library);
         }
         std::ofstream(root / "catalog.json") << "[{\"id\":\"incomplete-entry\"}]";
-        std::ofstream(root / "x-speech-rekon.json")
-            << R"({"show_micro_indicator":true,"show_micro_requester":true,"micro_opacity":50})";
+        const auto preferences = root / "x-speech-listen.json";
+        auto saved = Json::parse(std::ifstream(preferences));
+        require(saved.at("engine_enabled") == false, "disabled state is persisted");
+        saved.update({{"show_micro_indicator", true}, {"show_micro_requester", true}, {"micro_opacity", 50}});
+        std::ofstream(preferences) << saved;
         load(1, argv[1], root / "64/lin.xpl");
+        pump(1);
+        require(!read_dataref(XSL_DATAREF_SERVICE_READY) &&
+                provider_request(XSL_GET_STATUS, 0, 1).service_status == XSL_ENGINE_DISABLED,
+                "provider restores the saved disabled state");
+        draw(1);
+        click(55, 111); // Enable engine.
+        require(provider_request(XSL_GET_STATUS, 0, 1).service_status == XSL_ENGINE_RESTARTING,
+                "enable starts engine from the persisted disabled state");
         wait_for_engine();
         draw(1);
         {

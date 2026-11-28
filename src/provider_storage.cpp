@@ -10,7 +10,7 @@
 #include <windows.h>
 #endif
 
-namespace xsr {
+namespace xsl {
 namespace {
 Json json_file(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
@@ -33,6 +33,11 @@ bool Provider::valid_catalog_entry(const Json& entry) {
     if (!string_fields(entry, {"id", "quant", "revision", "file", "sha256"}) ||
         !entry.contains("bytes") || !entry["bytes"].is_number_unsigned() || entry["bytes"] == 0 ||
         !entry.contains("urls") || !entry["urls"].is_array() || entry["urls"].empty()) return false;
+    if (const auto previous = entry.find("previous"); previous != entry.end() &&
+        (entry["id"] != fluid_pro_id || !string_fields(*previous, {"revision", "sha256"}) ||
+         !previous->contains("bytes") || !previous->at("bytes").is_number_unsigned() ||
+         previous->at("bytes") == 0 || previous->at("bytes") == entry["bytes"] ||
+         !valid_digest(previous->at("sha256").get_ref<const std::string&>()))) return false;
     const Profile profile{entry.at("id"), {}, {}, {}, {}};
     return profile.supported() && valid_digest(entry["sha256"].get_ref<const std::string&>()) &&
         std::all_of(entry["urls"].begin(), entry["urls"].end(), [](const Json& url) {
@@ -102,13 +107,26 @@ void Provider::load_catalog() {
     if (catalog_error_) catalog_ = Json::parse(built_in_model_catalog);
 }
 
+std::string Provider::default_quantization_for(const std::string& model) const {
+    std::string fallback;
+    for (const auto& entry : catalog_) {
+        if (entry.at("id") != model) continue;
+        const auto quantization = entry.at("quant").get<std::string>();
+        if (quantization == "Q6_K") return quantization;
+        if (fallback.empty() || quantization == "Q8_0") fallback = quantization;
+    }
+    return fallback;
+}
+
 void Provider::load_preferences() {
     folder_ = root_ / "models";
+    selected_quant_ = default_quantization_for(selected_id_);
     const auto saved = json_file(preferences_);
     if (!saved.is_object()) return;
     try {
         folder_ = fs::u8path(saved.value("folder", folder_.u8string()));
-        const Profile preferred{saved.value("id", selected_id_), saved.value("quant", selected_quant_), {},
+        const auto model = saved.value("id", selected_id_);
+        const Profile preferred{model, saved.value("quant", default_quantization_for(model)), {},
                                 saved.value("path", ""), {}};
         if (preferred.supported()) {
             selected_id_ = preferred.id;
@@ -125,10 +143,14 @@ void Provider::load_preferences() {
         if (draft_.language != "en-US" && draft_.language != "fr-FR" && draft_.language != "es-ES")
             draft_.language = "auto";
         draft_.early = saved.value("early", false);
+        draft_.beam_width = std::clamp(saved.value("beam_width", 1), 1, int(XSL_MAX_CANDIDATES));
+        const auto bias = saved.value("vocabulary_enabled", Json());
+        if (bias.is_boolean()) draft_.vocabulary_enabled = bias.get<bool>();
+        draft_.vocabulary_weight = std::clamp(saved.value("vocabulary_weight", -1.0f), -1.0f, 4.0f);
         draft_.sidetone = saved.value("sidetone", false);
         draft_.low_latency_monitoring = saved.value("low_latency_monitoring", false);
-        draft_.monitor_gain_percent = std::clamp(saved.value("monitor_gain_percent", int(XSR_DEFAULT_MONITOR_GAIN_PERCENT)),
-                                                0, int(XSR_MAX_MONITOR_GAIN_PERCENT));
+        draft_.monitor_gain_percent = std::clamp(saved.value("monitor_gain_percent", int(XSL_DEFAULT_MONITOR_GAIN_PERCENT)),
+                                                0, int(XSL_MAX_MONITOR_GAIN_PERCENT));
         show_micro_indicator_ = saved.value("show_micro_indicator", false);
         show_micro_requester_ = saved.value("show_micro_requester", false);
         micro_opacity_ = std::clamp(saved.value("micro_opacity", 65), 0, 100);
@@ -138,6 +160,11 @@ void Provider::load_preferences() {
         draft_.unload = static_cast<UnloadPolicy>(std::clamp(saved.value("unload", 2), 0, 2));
         draft_.idle_minutes = std::clamp(saved.value("idle_minutes", 5), 1, 60);
     } catch (const Json::exception&) {}
+    idle_minutes_draft_ = draft_.idle_minutes;
+    if (saved.value("engine_enabled", Json(true)) == false) engine_mode_ = EngineMode::disabled;
+    const auto threads = saved.value("cpu_threads", Json());
+    if (threads.is_number_integer() && threads >= 1 && threads <= available_cpu_threads_)
+        requested_cpu_threads_ = threads.get<int>();
     broker_.set_settings(draft_, Clock::now());
 }
 
@@ -152,8 +179,11 @@ void Provider::save_preferences() {
     persisted_good_hash_ = last_good.sha256;
     preferences_retry_at_ = Clock::now() + 5s;
     Json saved = {{"interface_language", interface_locale().preference()}, {"folder", folder_.u8string()}, {"path", path}, {"id", id}, {"quant", quant},
+        {"engine_enabled", engine_mode_ != EngineMode::disabled}, {"cpu_threads", requested_cpu_threads_},
         {"microphone", settings.microphone}, {"compute", settings.compute}, {"language", settings.language},
-        {"early", settings.early}, {"sidetone", settings.sidetone},
+        {"early", settings.early}, {"beam_width", settings.beam_width},
+        {"vocabulary_enabled", settings.vocabulary_enabled ? Json(*settings.vocabulary_enabled) : Json()},
+        {"vocabulary_weight", settings.vocabulary_weight}, {"sidetone", settings.sidetone},
         {"low_latency_monitoring", settings.low_latency_monitoring}, {"monitor_gain_percent", settings.monitor_gain_percent},
         {"load", int(settings.load)},
         {"unload", int(settings.unload)}, {"idle_minutes", settings.idle_minutes},
@@ -164,4 +194,4 @@ void Provider::save_preferences() {
     writer_.save(saved.dump(2, ' ', false, Json::error_handler_t::replace));
 }
 
-} // namespace xsr
+} // namespace xsl

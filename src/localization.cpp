@@ -1,6 +1,6 @@
 #include "localization.hpp"
 #include "english_catalog.hpp"
-#include "xspeech_rekon.h"
+#include "xspeech_listen.h"
 
 #include <XPLMPlugin.h>
 #include <XPLMUtilities.h>
@@ -10,7 +10,7 @@
 #include <cstring>
 #include <fstream>
 
-namespace xsr {
+namespace xsl {
 namespace {
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -115,15 +115,15 @@ const char* ui_label(const char* key) { return interface_locale().lookup(key, tr
 fs::path preferences_path() {
     char path[1024]{};
     XPLMGetPrefsPath(path);
-    return fs::u8path(path).parent_path() / "x-speech-rekon.json";
+    return fs::u8path(path).parent_path() / "x-speech-listen.json";
 }
 
 fs::path interface_directory(bool diagnostic) {
-    auto id = diagnostic ? XPLMFindPluginBySignature(XSR_PROVIDER_SIGNATURE) : XPLMGetMyID();
+    auto id = diagnostic ? XPLMFindPluginBySignature(XSL_PROVIDER_SIGNATURE) : XPLMGetMyID();
     char path[1024]{};
     XPLMGetPluginInfo(id == XPLM_NO_PLUGIN_ID ? XPLMGetMyID() : id, nullptr, path, nullptr, nullptr);
     auto root = fs::u8path(path).parent_path().parent_path();
-    if (id == XPLM_NO_PLUGIN_ID) root = root.parent_path() / "X-Speech-Rekon";
+    if (id == XPLM_NO_PLUGIN_ID) root = root.parent_path() / "X-Speech-Listen";
     return root / "locales";
 }
 
@@ -141,4 +141,4 @@ void copy_plugin_description(char* destination, const char* key) {
     std::memcpy(destination, value, size);
     destination[size] = '\0';
 }
-} // namespace xsr
+} // namespace xsl

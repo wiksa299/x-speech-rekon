@@ -2,7 +2,7 @@
 
 #include "core.hpp"
 
-namespace xsr {
+namespace xsl {
 
 enum class ActivityPhase { awaiting_audio, capturing, released_before_audio, transcribing };
 
@@ -26,4 +26,4 @@ struct ActivityProgress {
     }
 };
 
-} // namespace xsr
+} // namespace xsl

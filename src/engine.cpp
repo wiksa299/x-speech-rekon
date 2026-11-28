@@ -1,13 +1,10 @@
 #include "audio.hpp"
 #include "desktop.hpp"
+#include "fluid_weights.hpp"
 #include "models.hpp"
-#include "whisper_repeat.hpp"
-#ifdef XSR_MOONSHINE
-#include "moonshine.hpp"
-#endif
 
 #include <transcribe.h>
-#include <transcribe/whisper.h>
+#include <transcribe/listen.h>
 
 #include <algorithm>
 #include <condition_variable>
@@ -21,13 +18,11 @@
 #include <io.h>
 #endif
 
-namespace xsr {
+namespace xsl {
 namespace {
 
 class Engine {
 public:
-    explicit Engine(const fs::path& executable)
-        : whisper_path_(executable.parent_path() / "whisper" / fs::path("xsr-whisper").concat(executable.extension().native())) {}
     ~Engine() { unload(); }
 
     int run() {
@@ -40,17 +35,11 @@ public:
                 std::string_view(info.kind) != "vulkan" || info.device_type == TRANSCRIBE_DEVICE_TYPE_CPU) continue;
             const auto id = std::string("vulkan/") + (info.device_id && *info.device_id ? info.device_id : info.name);
             const auto label = std::string("Vulkan · ") + (info.description && *info.description ? info.description : info.name);
-            vulkan_devices_.emplace(id, ComputeDevice{device, label, info.description ? info.description : ""});
+            vulkan_devices_.emplace(id, ComputeDevice{device, label});
             devices.push_back({{"id", id}, {"label", label}});
         }
         Json hello = {{"type", "hello"}, {"protocol", 1}, {"version", transcribe_version()},
                       {"devices", std::move(devices)}};
-        std::error_code file_error;
-        if (fs::is_regular_file(whisper_path_, file_error)) hello["whisper_version"] = XSR_WHISPER_VERSION;
-#ifdef XSR_MOONSHINE
-        hello["moonshine_models"] = moonshine_catalog();
-        hello["moonshine_version"] = XSR_MOONSHINE_VERSION;
-#endif
         publish(hello);
         std::thread inference([&] { inference_loop(); });
         std::thread files([&] { file_loop(); });
@@ -96,7 +85,7 @@ private:
         std::lock_guard lock(mutex_);
         if (type == "begin") {
             const auto session = message.at("session").get<uint64_t>();
-            if (active_) return {{"type", "result"}, {"session", session}, {"status", XSR_BUSY}};
+            if (active_) return {{"type", "result"}, {"session", session}, {"status", XSL_BUSY}};
             const bool microphone_test = message.value("microphone_test", false);
             microphone_playing_ = 0;
             if (microphone_test) microphone_take_ = session;
@@ -158,7 +147,7 @@ private:
 
     void state(uint32_t value) {
         Json message{{"type", "state"}, {"generation", generation_}, {"state", value}};
-        if (value == XSR_MODEL_READY) {
+        if (value == XSL_MODEL_READY) {
             message["compute"] = actual_compute_;
             message["cpu_fallback"] = requested_compute_ != "cpu" && actual_compute_ == "CPU";
         }
@@ -166,44 +155,29 @@ private:
     }
 
     bool loaded() const {
-#ifdef XSR_MOONSHINE
-        if (moonshine_ != nullptr) return true;
-#endif
-        return model_ != nullptr || whisper_ != nullptr;
+        return model_ != nullptr;
     }
 
     void unload() {
-#ifdef XSR_MOONSHINE
-        moonshine_.reset();
-#endif
         model_.reset();
-        whisper_.reset();
     }
 
     bool load() {
         if (loaded()) return true;
         if (path_.empty()) return false;
-        state(XSR_MODEL_LOADING);
-#ifdef XSR_MOONSHINE
-        if (const auto* bundle = moonshine_bundle(sha256_)) {
-            const auto path = fs::u8path(path_);
-            if (matches_bundle(path, *bundle, stopping_))
-                moonshine_.reset(xsr_moonshine_load(path.c_str(), bundle->at("id") == "moonshine-voice-medium"));
-            actual_compute_ = "CPU";
-            state(loaded() ? XSR_MODEL_READY : XSR_MODEL_MISSING);
-            return loaded();
-        }
-#endif
+        state(XSL_MODEL_LOADING);
         if (!matches_digest(fs::u8path(path_), sha256_, stopping_)) {
-            state(XSR_MODEL_MISSING);
+            state(XSL_MODEL_MISSING);
             return false;
         }
-        if (model_id_ == whisper_cpp_id) {
-            whisper_ = load_whisper(requested_compute_);
-            // A driver failure can terminate the worker during model loading.
-            if (!whisper_ && requested_compute_ != "cpu" && !stopping_) whisper_ = load_whisper("cpu");
-            state(loaded() ? XSR_MODEL_READY : XSR_MODEL_MISSING);
-            return loaded();
+        std::string inference_path = path_;
+        if (Profile{model_id_, {}, {}, {}, {}}.fluid()) {
+            if (!fluid_weights_.prepare(model_id_, fs::u8path(path_), sha256_, stopping_)) {
+                std::cerr << "Could not prepare verified Fluid weights\n";
+                state(XSL_MODEL_MISSING);
+                return false;
+            }
+            inference_path = fluid_weights_.path().u8string();
         }
         transcribe_model_load_params params{};
         transcribe_model_load_params_init(&params);
@@ -212,20 +186,20 @@ private:
         if (gpu != vulkan_devices_.end()) {
             params.backend = TRANSCRIBE_BACKEND_VULKAN;
             params.device = gpu->second.handle;
-            if (transcribe_model_load_file(path_.c_str(), &params, &candidate) == TRANSCRIBE_OK)
+            if (transcribe_model_load_file(inference_path.c_str(), &params, &candidate) == TRANSCRIBE_OK)
                 actual_compute_ = gpu->second.label;
         }
         if (!candidate) {
             params.backend = TRANSCRIBE_BACKEND_CPU;
             params.device = nullptr;
-            if (transcribe_model_load_file(path_.c_str(), &params, &candidate) != TRANSCRIBE_OK) {
-                state(XSR_MODEL_MISSING);
+            if (transcribe_model_load_file(inference_path.c_str(), &params, &candidate) != TRANSCRIBE_OK) {
+                state(XSL_MODEL_MISSING);
                 return false;
             }
             actual_compute_ = "CPU";
         }
         model_.reset(candidate);
-        state(XSR_MODEL_READY);
+        state(XSL_MODEL_READY);
         return true;
     }
 
@@ -253,18 +227,20 @@ private:
                 auto model = next.request.value("model", "");
                 if (!Profile{model, {}, {}, {}, {}}.supported()) path.clear();
                 if (path != path_ || sha256 != sha256_ || compute != requested_compute_ || model != model_id_) unload();
+                if (path != path_ || sha256 != sha256_ || model != model_id_) fluid_weights_.reset();
                 path_ = std::move(path);
                 sha256_ = std::move(sha256);
                 requested_compute_ = std::move(compute);
+                cpu_threads_ = next.request.value("cpu_threads", 0);
                 model_id_ = std::move(model);
                 generation_ = next.request.value("generation", uint64_t(0));
-                if (path_.empty()) state(XSR_MODEL_MISSING);
-                else if (loaded()) state(XSR_MODEL_READY);
+                if (path_.empty()) state(XSL_MODEL_MISSING);
+                else if (loaded()) state(XSL_MODEL_READY);
                 else if (next.request.value("preload", false)) load();
-                else state(XSR_MODEL_UNLOADED);
+                else state(XSL_MODEL_UNLOADED);
             } else if (type == "unload" && next.request.value("generation", uint64_t(0)) == generation_) {
                 unload();
-                state(path_.empty() ? XSR_MODEL_MISSING : XSR_MODEL_UNLOADED);
+                state(path_.empty() ? XSL_MODEL_MISSING : XSL_MODEL_UNLOADED);
             } else if (type == "microphones") {
                 publish({{"type", "microphones"}, {"items", microphone_list()}});
             } else if (type == "mic_play") {
@@ -307,7 +283,7 @@ private:
                     const auto& catalog = next.at("catalog");
                     if (type == "scan")
                         publish({{"type", type}, {"ticket", ticket}, {"status", "ok"},
-                                 {"items", scan_models(path, catalog, stopping_)}});
+                                 {"items", scan_models(path, catalog, stopping_, next.value("require_directory", false))}});
                     else
                         publish({{"type", type}, {"ticket", ticket}, {"status", "ok"},
                                  {"model", identify_model(path, catalog, stopping_)}});
@@ -355,10 +331,10 @@ private:
         control.stop_capture();
         const auto count = recording.count.load(std::memory_order_acquire);
         uint32_t status = recording.error;
-        if (control.cancelled) status = XSR_CANCELLED;
-        else if (status == XSR_OK && !count) status = XSR_NO_AUDIO;
+        if (control.cancelled) status = XSL_CANCELLED;
+        else if (status == XSL_OK && !count) status = XSL_NO_AUDIO;
         Json result = {{"status", status}, {"microphone_test", true}};
-        if (status != XSR_OK) return result;
+        if (status != XSL_OK) return result;
         result.update(microphone_measurement(recording.samples.data(), count));
         if (microphone_take_ == control.id) {
             recording.samples.resize(count);
@@ -372,8 +348,8 @@ private:
         const auto microphone = request.value("microphone", "");
         const auto injection = fs::u8path(request.value("injection", ""));
         const auto gain_percent = request.value("sidetone", false) ?
-            std::min(request.value("monitor_gain_percent", XSR_DEFAULT_MONITOR_GAIN_PERCENT),
-                     XSR_MAX_MONITOR_GAIN_PERCENT) : 0u;
+            std::min(request.value("monitor_gain_percent", XSL_DEFAULT_MONITOR_GAIN_PERCENT),
+                     XSL_MAX_MONITOR_GAIN_PERCENT) : 0u;
         const auto monitor_gain = static_cast<float>(gain_percent) / 100.0f;
         const bool low_latency = request.value("low_latency_monitoring", false);
         control.capture = std::thread([this, &control, microphone, injection, monitor_gain, low_latency] {
@@ -395,13 +371,6 @@ private:
     }
 
     Json transcribe(const Json& request, Control& control);
-    Json transcribe_whisper(const Json& request, Control& control);
-    std::unique_ptr<Process> load_whisper(const std::string& compute);
-    Json whisper_reply(Process& process, const std::atomic<bool>& cancelled, Clock::duration timeout) const;
-#ifdef XSR_MOONSHINE
-    Json transcribe_moonshine(const Json& request, Control& control);
-    std::unique_ptr<MoonshineTranscriber, decltype(&xsr_moonshine_free)> moonshine_{nullptr, xsr_moonshine_free};
-#endif
 
     std::mutex mutex_, output_;
     std::condition_variable available_;
@@ -417,106 +386,45 @@ private:
     struct ComputeDevice {
         transcribe_device_t handle;
         std::string label;
-        std::string description;
     };
     std::map<std::string, ComputeDevice> vulkan_devices_;
+    FluidWeights fluid_weights_;
     std::unique_ptr<transcribe_model, decltype(&transcribe_model_free)> model_{nullptr, transcribe_model_free};
-    fs::path whisper_path_;
-    std::unique_ptr<Process> whisper_;
     std::string path_, sha256_, model_id_;
     std::string requested_compute_ = "cpu", actual_compute_;
+    int cpu_threads_ = 0;
     uint64_t generation_ = 0;
 };
 
-Json Engine::whisper_reply(Process& process, const std::atomic<bool>& cancelled, Clock::duration timeout) const {
-    const auto deadline = Clock::now() + timeout;
-    while (!stopping_ && !cancelled && Clock::now() < deadline) {
-        auto messages = process.receive();
-        if (!messages.empty()) return std::move(messages.front());
-        if (process.failed()) break;
-        std::this_thread::sleep_for(5ms);
-    }
-    return Json::object();
-}
-
-std::unique_ptr<Process> Engine::load_whisper(const std::string& compute) {
-    const auto device = vulkan_devices_.find(compute);
-    const auto requested = device == vulkan_devices_.end() ? "cpu" : compute;
-    auto process = std::make_unique<Process>(whisper_path_);
-    if (!process->start() ||
-        !process->send({{"type", "load"}, {"path", path_}, {"compute", requested},
-                        {"description", device == vulkan_devices_.end() ? "" : device->second.description}})) return {};
-    const auto reply = whisper_reply(*process, stopping_, 8s);
-    if (reply.value("type", "") != "loaded" || !reply.value("ok", false)) return {};
-    actual_compute_ = device != vulkan_devices_.end() && reply.value("gpu", false) ? device->second.label : "CPU";
-    return process;
-}
-
-Json Engine::transcribe_whisper(const Json& request, Control& control) {
-    const auto error = [](uint32_t status) { return Json{{"status", status}}; };
-    const auto& recording = control.recording;
-    const bool capture = request.value("wav", "").empty();
-    while (capture && !recording.closed && !control.cancelled)
-        std::this_thread::sleep_for(10ms);
-    if (control.cancelled) return error(XSR_CANCELLED);
-    if (recording.error != XSR_OK) return error(recording.error);
-    const auto count = recording.count.load(std::memory_order_acquire);
-    if (!contains_audio(recording.samples.data(), count)) return error(XSR_NO_SPEECH);
-
-    bool sent = true;
-    const auto* bytes = reinterpret_cast<const unsigned char*>(recording.samples.data());
-    for (size_t offset = 0; offset < count && sent && !control.cancelled; offset += whisper_chunk_samples) {
-        const auto end = std::min(count, offset + whisper_chunk_samples) * sizeof(float);
-        std::string pcm;
-        pcm.reserve((end - offset * sizeof(float)) * 2);
-        constexpr char hex[] = "0123456789abcdef";
-        for (size_t i = offset * sizeof(float); i < end; ++i) {
-            pcm += hex[bytes[i] >> 4];
-            pcm += hex[bytes[i] & 15];
-        }
-        sent = whisper_->send({{"type", "audio"}, {"pcm", std::move(pcm)}});
-    }
-    if (sent && !control.cancelled && whisper_->send({{"type", "decode"}, {"terms", request.at("terms")}})) {
-        auto reply = whisper_reply(*whisper_, control.cancelled, 30s);
-        if (reply.value("type", "") == "result" && !control.cancelled) return reply;
-    }
-    unload();
-    state(XSR_MODEL_UNLOADED);
-    return error(control.cancelled ? XSR_CANCELLED : XSR_ENGINE_ERROR);
-}
-
 Json Engine::transcribe(const Json& request, Control& control) {
     const auto error = [](uint32_t status) { return Json{{"status", status}}; };
-    if (request.value("generation", uint64_t(0)) != generation_) return error(XSR_MODEL_UNAVAILABLE);
-    if (control.cancelled) return error(XSR_CANCELLED);
+    if (request.value("generation", uint64_t(0)) != generation_) return error(XSL_MODEL_UNAVAILABLE);
+    if (control.cancelled) return error(XSL_CANCELLED);
     const auto sample = request.value("wav", "");
     auto& recording = control.recording;
     if (sample.empty()) {
         while (!recording.count && !recording.closed && !control.cancelled && !control.released)
             std::this_thread::sleep_for(5ms);
         if (!recording.count) {
-            if (control.cancelled) return error(XSR_CANCELLED);
-            return error(recording.error != XSR_OK ? uint32_t(recording.error) : XSR_NO_AUDIO);
+            if (control.cancelled) return error(XSL_CANCELLED);
+            return error(recording.error != XSL_OK ? uint32_t(recording.error) : XSL_NO_AUDIO);
         }
     } else {
         recording.samples = read_wav(fs::u8path(sample));
         recording.count = recording.samples.size();
-        if (!recording.count) return error(XSR_BAD_REQUEST);
+        if (!recording.count) return error(XSL_BAD_REQUEST);
     }
 
-    if (!load()) return error(XSR_MODEL_UNAVAILABLE);
-    if (control.cancelled) return error(XSR_CANCELLED);
-    if (whisper_) return transcribe_whisper(request, control);
-#ifdef XSR_MOONSHINE
-    if (moonshine_ != nullptr) return transcribe_moonshine(request, control);
-#endif
+    if (!load()) return error(XSL_MODEL_UNAVAILABLE);
+    if (control.cancelled) return error(XSL_CANCELLED);
     transcribe_session_params session_parameters{};
     transcribe_session_params_init(&session_parameters);
-    const auto cores = std::max(2u, std::thread::hardware_concurrency());
-    session_parameters.n_threads = int(std::min(6u, cores / 2));
+    const auto cores = std::max(1u, std::thread::hardware_concurrency());
+    session_parameters.n_threads = requested_compute_ == "cpu" && cpu_threads_ > 0 ?
+        std::min(cpu_threads_, static_cast<int>(cores)) : default_cpu_threads(cores);
     transcribe_session* raw_session = nullptr;
     if (transcribe_session_init(model_.get(), &session_parameters, &raw_session) != TRANSCRIBE_OK)
-        return error(XSR_ENGINE_ERROR);
+        return error(XSL_ENGINE_ERROR);
     std::unique_ptr<transcribe_session, decltype(&transcribe_session_free)> session(raw_session, transcribe_session_free);
     transcribe_set_abort_callback(session.get(), +[](void* pointer) {
         return static_cast<Control*>(pointer)->cancelled.load();
@@ -525,15 +433,21 @@ Json Engine::transcribe(const Json& request, Control& control) {
     auto terms = request.value("terms", std::vector<std::string>{});
     std::vector<const char*> pointers;
     for (const auto& term : terms) pointers.push_back(term.c_str());
-    uint32_t vocabulary = XSR_VOCAB_NONE;
+    uint32_t vocabulary = XSL_VOCAB_NONE;
     transcribe_run_params params{};
     transcribe_run_params_init(&params);
     const bool streaming = request.value("early", false);
+    transcribe_listen_decode_params decode_options{};
+    transcribe_listen_decode_params_init(&decode_options);
+    decode_options.beam_width = std::clamp(request.value("beam_width", 1), 1, int(XSL_MAX_CANDIDATES));
+    decode_options.vocabulary_boost = std::clamp(request.value("vocabulary_weight", -1.0f), -1.0f, 4.0f);
+    if (!streaming && (decode_options.beam_width > 1 || decode_options.vocabulary_boost >= 0.0f))
+        params.family = &decode_options.ext;
     const auto language_hint = request.value("language", "");
     if (!language_hint.empty() && language_hint != "auto") params.language = language_hint.c_str();
-    if (!pointers.empty()) {
+    if (!pointers.empty() && decode_options.vocabulary_boost != 0.0f) {
         const bool supported = !streaming && transcribe_model_supports(model_.get(), TRANSCRIBE_FEATURE_VOCABULARY);
-        vocabulary = supported ? XSR_VOCAB_APPLIED : XSR_VOCAB_UNSUPPORTED;
+        vocabulary = supported ? XSL_VOCAB_APPLIED : XSL_VOCAB_UNSUPPORTED;
         if (supported) {
             params.vocabulary = pointers.data();
             params.n_vocabulary = int32_t(pointers.size());
@@ -548,7 +462,7 @@ Json Engine::transcribe(const Json& request, Control& control) {
         return result;
     };
     if (streaming && timed([&] { return transcribe_stream_begin(session.get(), &params, nullptr); }) != TRANSCRIBE_OK)
-        return error(XSR_ENGINE_ERROR);
+        return error(XSL_ENGINE_ERROR);
     size_t fed = 0;
     auto status = TRANSCRIBE_OK;
     while (sample.empty() && !recording.closed && !control.cancelled && status == TRANSCRIBE_OK) {
@@ -562,10 +476,10 @@ Json Engine::transcribe(const Json& request, Control& control) {
             std::this_thread::sleep_for(10ms);
         }
     }
-    if (control.cancelled) return error(XSR_CANCELLED);
-    if (recording.error != XSR_OK) return error(recording.error);
+    if (control.cancelled) return error(XSL_CANCELLED);
+    if (recording.error != XSL_OK) return error(recording.error);
     const auto count = recording.count.load(std::memory_order_acquire);
-    if (!contains_audio(recording.samples.data(), count)) return error(XSR_NO_SPEECH);
+    if (!contains_audio(recording.samples.data(), count)) return error(XSL_NO_SPEECH);
     if (streaming) {
         if (status == TRANSCRIBE_OK && count > fed) {
             status = timed([&] {
@@ -577,101 +491,39 @@ Json Engine::transcribe(const Json& request, Control& control) {
     } else {
         status = timed([&] { return transcribe_run(session.get(), recording.samples.data(), int(count), &params); });
     }
-    if (control.cancelled) return error(XSR_CANCELLED);
+    if (control.cancelled) return error(XSL_CANCELLED);
     if (status == TRANSCRIBE_ERR_OUTPUT_TRUNCATED || transcribe_was_truncated(session.get()))
-        return error(XSR_OUTPUT_TRUNCATED);
-    if (status != TRANSCRIBE_OK) return error(XSR_ENGINE_ERROR);
+        return error(XSL_OUTPUT_TRUNCATED);
+    if (status != TRANSCRIBE_OK) return error(XSL_ENGINE_ERROR);
     std::string text = transcribe_full_text(session.get());
-    if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XSR_NO_SPEECH);
-    if (text.size() > max_result_size) return error(XSR_OUTPUT_TRUNCATED);
-    if (!valid_utf8(text)) return error(XSR_ENGINE_ERROR);
+    if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XSL_NO_SPEECH);
+    if (text.size() > max_result_size) return error(XSL_OUTPUT_TRUNCATED);
+    if (!valid_utf8(text)) return error(XSL_ENGINE_ERROR);
     const char* detected = transcribe_detected_language(session.get());
     const std::string language = detected && *detected ? detected : params.language ? params.language : "";
-    if (!streaming && model_id_ == whisper_transcribe_id) {
-        const auto prefix_end = whisper_repeated_prefix_end(text);
-        const auto expected = prefix_end ? std::optional{whisper_words(std::string_view(text).substr(0, *prefix_end))} :
-            whisper_without_repeated_tail(text);
-        if (expected) {
-            auto retry_params = params;
-            retry_params.vocabulary = nullptr;
-            retry_params.n_vocabulary = 0;
-            transcribe_whisper_run_ext options{};
-            transcribe_whisper_run_ext_init(&options);
-            options.temperature = vocabulary == XSR_VOCAB_APPLIED ? 0.f : 0.2f;
-            options.temperature_inc = 0.f;
-            retry_params.family = &options.ext;
-            if (control.cancelled) return error(XSR_CANCELLED);
-            const auto retry_status = timed([&] {
-                return transcribe_run(session.get(), recording.samples.data(), int(count), &retry_params);
-            });
-            if (control.cancelled) return error(XSR_CANCELLED);
-            bool retry_confirmed = false;
-            if (retry_status == TRANSCRIBE_OK && !transcribe_was_truncated(session.get())) {
-                std::string retry = transcribe_full_text(session.get());
-                if (retry.size() <= max_result_size && valid_utf8(retry) && whisper_words(retry) == *expected) {
-                    text = std::move(retry);
-                    retry_confirmed = true;
-                    if (vocabulary == XSR_VOCAB_APPLIED) vocabulary = XSR_VOCAB_NONE;
-                }
-            }
-            if (!retry_confirmed && prefix_end) text.resize(*prefix_end);
-        }
+    Json candidates = Json::array();
+    // Leave room for escaping, the primary text, and the rest of the frame.
+    auto remaining = max_frame - 1024 - Json(text).dump().size();
+    for (int i = 0; i < std::min(int(XSL_MAX_CANDIDATES), transcribe_n_hypotheses(session.get())); ++i) {
+        const std::string_view candidate = transcribe_hypothesis_text(session.get(), i);
+        if (candidate.empty() || candidate.size() > max_result_size || !valid_utf8(candidate)) continue;
+        Json value = candidate;
+        const auto bytes = value.dump().size() + 1;
+        if (bytes > remaining) break;
+        remaining -= bytes;
+        candidates.push_back(std::move(value));
     }
-    return {{"status", XSR_OK}, {"text", std::move(text)},
+    return {{"status", XSL_OK}, {"text", std::move(text)}, {"candidates", std::move(candidates)},
             {"language", language},
             {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
             {"compute_ms", std::chrono::duration_cast<std::chrono::milliseconds>(compute_time).count()}};
 }
 
-#ifdef XSR_MOONSHINE
-Json Engine::transcribe_moonshine(const Json& request, Control& control) {
-    const auto error = [](uint32_t status) { return Json{{"status", status}}; };
-    auto& recording = control.recording;
-    const bool capture = request.value("wav", "").empty();
-    while (capture && !recording.closed && !control.cancelled)
-        std::this_thread::sleep_for(10ms);
-    if (control.cancelled) return error(XSR_CANCELLED);
-    if (recording.error != XSR_OK) return error(recording.error);
-    const auto count = recording.count.load(std::memory_order_acquire);
-    if (!contains_audio(recording.samples.data(), count)) return error(XSR_NO_SPEECH);
-
-    const auto terms = request.value("terms", std::vector<std::string>{});
-    const bool encodable = std::none_of(terms.begin(), terms.end(), [](const auto& term) {
-        return term.find(',') != std::string::npos || term.find('\0') != std::string::npos;
-    });
-    std::string csv;
-    if (encodable) {
-        for (const auto& term : terms) {
-            if (!csv.empty()) csv += ',';
-            csv += term;
-        }
-    }
-    const auto start = Clock::now();
-    // Replace the previous client's terms even when this request has no vocabulary.
-    if (!xsr_moonshine_terms(moonshine_.get(), csv.empty() ? nullptr : csv.c_str())) return error(XSR_ENGINE_ERROR);
-    std::vector<char> output(max_result_size + 1);
-    const auto status = xsr_moonshine_decode(moonshine_.get(), recording.samples.data(), count, sample_rate,
-                                             output.data(), output.size());
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
-    if (control.cancelled) return error(XSR_CANCELLED);
-    if (status == MoonshineResult::truncated) return error(XSR_OUTPUT_TRUNCATED);
-    if (status != MoonshineResult::ok) return error(XSR_ENGINE_ERROR);
-    std::string text(output.data());
-    if (text.find_first_not_of(" \r\t\n") == std::string::npos) return error(XSR_NO_SPEECH);
-    if (!valid_utf8(text)) return error(XSR_ENGINE_ERROR);
-    const auto vocabulary = terms.empty() ? XSR_VOCAB_NONE :
-        csv.empty() ? XSR_VOCAB_UNSUPPORTED : XSR_VOCAB_APPLIED;
-    return {{"status", XSR_OK}, {"text", std::move(text)}, {"language", "en"},
-            {"vocabulary", vocabulary}, {"capture_ms", count * 1000 / sample_rate},
-            {"compute_ms", elapsed.count()}};
-}
-#endif
 
 } // namespace
-} // namespace xsr
+} // namespace xsl
 
-int main(int argc, char** argv) {
-    if (argc < 1) return 1;
+int main() {
 #ifdef _WIN32
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
@@ -680,7 +532,7 @@ int main(int argc, char** argv) {
     std::cin.tie(nullptr);
     try {
         if (transcribe_init_backends_default() != TRANSCRIBE_OK) return 1;
-        return xsr::Engine{xsr::executable_path(argv[0])}.run();
+        return xsl::Engine{}.run();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

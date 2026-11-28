@@ -1,7 +1,4 @@
 #include "models.hpp"
-#ifdef XSR_MOONSHINE
-#include "moonshine_catalog.hpp"
-#endif
 
 #include <gguf.h>
 #include <ggml.h>
@@ -20,7 +17,7 @@
 #include <openssl/evp.h>
 #endif
 
-namespace xsr {
+namespace xsl {
 namespace {
 
 #ifdef _WIN32
@@ -93,23 +90,11 @@ Json inspect(const fs::path& path, const Json& catalog) {
     std::ifstream input(path, std::ios::binary);
     char signature[4];
     if (!input.read(signature, sizeof(signature))) return {};
-    const std::string_view magic(signature, 4);
-    if (magic != "GGUF" && magic != "lmgg") return {};
+    if (std::string_view(signature, 4) != "GGUF") return {};
     std::error_code ec;
     const auto size = fs::file_size(path, ec);
     if (ec) return {};
     Json answer = {{"path", path.u8string()}, {"bytes", size}, {"state", "incompatible"}};
-    if (magic == "lmgg") {
-        for (const auto& entry : catalog) {
-            if (entry.at("id") == whisper_cpp_id && entry.at("bytes") == size) {
-                answer["state"] = "candidate";
-                answer["id"] = entry.at("id");
-                answer["quant"] = entry.at("quant");
-                break;
-            }
-        }
-        return answer;
-    }
     std::unique_ptr<gguf_context, decltype(&gguf_free)> context(
         gguf_init_from_callback(read_metadata, &input, 0, size, {true, nullptr}), gguf_free);
     if (!context) {
@@ -123,13 +108,21 @@ Json inspect(const fs::path& path, const Json& catalog) {
     if (architecture == "parakeet" && variant == "tdt-0.6b-v2") id = parakeet_v2_id;
     if (architecture == "parakeet" && variant == "tdt-0.6b-v3") id = "parakeet-tdt-0.6b-v3";
     if (architecture == "parakeet" && variant == nemotron_id) id = nemotron_id;
-    if (architecture == "moonshine_streaming" && variant.rfind("moonshine-streaming-", 0) == 0) id = variant;
-    if (architecture == "whisper" && variant == "whisper-small.en") id = whisper_transcribe_id;
+    if (architecture == "moonshine_streaming" && variant == moonshine_small_id) id = variant;
+    if (architecture == "parakeet" && variant.empty()) {
+        const auto name = meta(gguf, "general.name");
+        if (name == "fluid-speech-mini") id = fluid_mini_id;
+        if (name == "Fluid Speech Pro") id = fluid_pro_id;
+        const auto clean = gguf_find_key(gguf, "parakeet.fluid_clean_mode");
+        if (clean >= 0 && gguf_get_kv_type(gguf, clean) == GGUF_TYPE_BOOL &&
+            !gguf_get_val_bool(gguf, clean) && gguf_find_tensor(gguf, "encoder.fv_insert.ln.weight") >= 0)
+            id = fluid_pro_id;
+    }
     if (!Profile{id, {}, {}, {}, {}}.supported()) return answer;
     const auto type_key = gguf_find_key(gguf, "general.file_type");
     const uint32_t type = type_key >= 0 && gguf_get_kv_type(gguf, type_key) == GGUF_TYPE_UINT32 ?
         gguf_get_val_u32(gguf, type_key) : UINT32_MAX;
-    bool q4 = false, q6 = false, q8 = false;
+    bool q2 = false, q4 = false, q6 = false, q8 = false;
     const auto start = gguf_get_data_offset(gguf);
     const auto tensors = gguf_get_n_tensors(gguf);
     if (!tensors || start >= size) {
@@ -144,6 +137,7 @@ Json inspect(const fs::path& path, const Json& catalog) {
             return answer;
         }
         const auto tensor_type = gguf_get_tensor_type(gguf, i);
+        q2 |= tensor_type == GGML_TYPE_Q2_K;
         q4 |= tensor_type == GGML_TYPE_Q4_K;
         q6 |= tensor_type == GGML_TYPE_Q6_K;
         q8 |= tensor_type == GGML_TYPE_Q8_0;
@@ -152,13 +146,19 @@ Json inspect(const fs::path& path, const Json& catalog) {
     if (type == 7 && q8 && !q4 && !q6) quant = "Q8_0";
     if (type == 15 && q4) quant = "Q4_K_M";
     if (type == 18 && q6 && !q4) quant = "Q6_K";
+    if (id == fluid_mini_id && q2 && q4) quant = "Q2_K/Q4_K";
+    if (id == fluid_pro_id && q8 && !q2 && !q4 && !q6) quant = "Q8_0";
     for (const auto& entry : catalog) {
-        if (id == entry.at("id") && quant == entry.at("quant")) {
-            answer["state"] = "candidate";
-            answer["id"] = id;
-            answer["quant"] = quant;
-            break;
+        if (id != entry.at("id") || quant != entry.at("quant")) continue;
+        if (Profile{id, {}, {}, {}, {}}.fluid() && size != entry.at("bytes")) {
+            const auto previous = entry.find("previous");
+            if (previous == entry.end() || !previous->is_object() || size != previous->at("bytes")) continue;
+            answer["previous"] = true;
         }
+        answer["state"] = "candidate";
+        answer["id"] = id;
+        answer["quant"] = quant;
+        break;
     }
     return answer;
 }
@@ -205,7 +205,7 @@ bool get(const std::string& url, Transfer& transfer) {
     std::wstring path(components.lpszUrlPath, components.dwUrlPathLength);
     if (components.dwExtraInfoLength) path.append(components.lpszExtraInfo, components.dwExtraInfoLength);
 
-    HttpHandle session{WinHttpOpen(L"X-Speech-Rekon/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    HttpHandle session{WinHttpOpen(L"X-Speech-Listen/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
     if (!session || !WinHttpSetTimeouts(session.handle, 5000, 5000, 5000, 3000)) return false;
     HttpHandle connection{WinHttpConnect(session.handle, host.c_str(), components.nPort, 0)};
@@ -247,7 +247,7 @@ bool get(const std::string& url, Transfer& transfer) {
     curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 8L);
     curl_easy_setopt(curl.get(), CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_LOW_SPEED_TIME, 10L);
-    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "X-Speech-Rekon/0.1");
+    curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "X-Speech-Listen/0.1");
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION,
         +[](char* buffer, size_t size, size_t count, void* userdata) -> size_t {
             const auto bytes = size * count;
@@ -269,64 +269,21 @@ bool get(const std::string& url, Transfer& transfer) {
 
 } // namespace
 
-const Json& moonshine_catalog() {
-#ifdef XSR_MOONSHINE
-    static const Json catalog = Json::parse(moonshine_catalog_json);
-#else
-    static const Json catalog = Json::array();
-#endif
-    return catalog;
-}
-
-const Json* moonshine_bundle(const std::string& hash) {
-    const auto& catalog = moonshine_catalog();
-    const auto entry = std::find_if(catalog.begin(), catalog.end(), [&](const Json& model) {
-        return model.at("sha256") == hash;
-    });
-    return entry == catalog.end() ? nullptr : &*entry;
-}
-
-static bool bundle_has_expected_sizes(const fs::path& path, const Json& entry) {
-    std::error_code ec;
-    for (const auto& part : entry.at("parts")) {
-        const auto file = path / fs::u8path(part.at("file").get<std::string>());
-        if (fs::file_size(file, ec) != part.at("bytes").get<uint64_t>() || ec) return false;
-    }
-    return true;
-}
-
-bool matches_bundle(const fs::path& path, const Json& entry, const std::atomic<bool>& stop) {
-    if (!bundle_has_expected_sizes(path, entry)) return false;
-    for (const auto& part : entry.at("parts")) {
-        const auto file = path / fs::u8path(part.at("file").get<std::string>());
-        if (!matches_digest(file, part.at("sha256").get<std::string>(), stop)) return false;
-    }
-    return true;
-}
-
-static Json inspect_bundle(const fs::path& path, const std::atomic<bool>* stop = nullptr) {
-    for (const auto& entry : moonshine_catalog()) {
-        if (stop ? !matches_bundle(path, entry, *stop) : !bundle_has_expected_sizes(path, entry)) continue;
-        return {{"path", path.u8string()}, {"state", "candidate"}, {"bytes", entry.at("bytes")},
-                {"id", entry.at("id")}, {"quant", entry.at("quant")},
-                {"revision", entry.at("revision")}, {"sha256", entry.at("sha256")}};
-    }
-    return {};
-}
-
-Json scan_models(const fs::path& folder, const Json& catalog, const std::atomic<bool>& stop) {
+Json scan_models(const fs::path& folder, const Json& catalog, const std::atomic<bool>& stop, bool require_directory) {
     Json found = Json::array();
+    if (require_directory && !folder.is_absolute()) throw std::invalid_argument("Expected an absolute folder path");
     std::error_code ec;
     size_t visited = 0;
-    for (fs::directory_iterator it(folder, fs::directory_options::skip_permission_denied, ec), end;
+    const auto options = require_directory ? fs::directory_options::none : fs::directory_options::skip_permission_denied;
+    for (fs::directory_iterator it(folder, options, ec), end;
          !ec && it != end && !stop && visited < 2048 && found.size() < 64; it.increment(ec), ++visited) {
         std::error_code item_error;
         if (it->path().extension() == ".part") continue;
         Json model;
-        if (it->is_directory(item_error)) model = inspect_bundle(it->path());
-        else if (it->is_regular_file(item_error)) model = inspect(it->path(), catalog);
+        if (it->is_regular_file(item_error)) model = inspect(it->path(), catalog);
         if (model.is_object()) found.push_back(std::move(model));
     }
+    if (require_directory && ec) throw fs::filesystem_error("Could not scan models folder", folder, ec);
     std::sort(found.begin(), found.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.at("path") < rhs.at("path");
     });
@@ -334,8 +291,6 @@ Json scan_models(const fs::path& folder, const Json& catalog, const std::atomic<
 }
 
 Json identify_model(const fs::path& path, const Json& catalog, const std::atomic<bool>& stop) {
-    std::error_code ec;
-    if (fs::is_directory(path, ec)) return inspect_bundle(path, &stop);
     auto model = inspect(path, catalog);
     if (!model.is_object() || model.value("state", "") != "candidate") return {};
     const auto hash = file_digest(path, stop);
@@ -343,13 +298,19 @@ Json identify_model(const fs::path& path, const Json& catalog, const std::atomic
     model["sha256"] = hash;
     model["revision"] = "sha256:" + hash;
     for (const auto& entry : catalog) {
-        if (entry.at("sha256") == hash && entry.at("bytes") == model.at("bytes") &&
-            entry.at("id") == model.at("id") && entry.at("quant") == model.at("quant")) {
-            model["revision"] = entry.at("revision");
+        if (entry.at("id") != model.at("id") || entry.at("quant") != model.at("quant")) continue;
+        const auto* artifact = &entry;
+        if (model.value("previous", false)) {
+            const auto previous = entry.find("previous");
+            if (previous == entry.end() || !previous->is_object()) continue;
+            artifact = &*previous;
+        }
+        if (artifact->at("sha256") == hash && artifact->at("bytes") == model.at("bytes")) {
+            model["revision"] = artifact->at("revision");
             return model;
         }
     }
-    if (model.at("id") == whisper_cpp_id) return {};
+    if (Profile{model.at("id"), {}, {}, {}, {}}.fluid()) return {};
     return model;
 }
 
@@ -400,25 +361,12 @@ static std::string download_part(const fs::path& folder, const Json& entry,
 std::string download_model(const fs::path& folder, const Json& entry,
                            const std::atomic<bool>& stop, const std::function<void(uint64_t)>& progress) {
     const auto name = fs::u8path(entry.at("file").get<std::string>());
-    const auto hash = entry.at("sha256").get<std::string>();
-    const auto* bundle = moonshine_bundle(hash);
-    const bool whisper = entry.at("id") == whisper_cpp_id && name == "ggml-small.en-q8_0.bin";
-    if (name.empty() || name.has_parent_path() ||
-        (bundle ? entry.at("file") != bundle->at("file") : !whisper && name.extension() != ".gguf")) return "destination";
-    const auto destination = bundle ? folder / name : folder;
+    if (name.empty() || name.has_parent_path() || name.extension() != ".gguf" ||
+        !Profile{entry.at("id"), {}, {}, {}, {}}.supported()) return "destination";
     std::error_code ec;
-    fs::create_directories(destination, ec);
+    fs::create_directories(folder, ec);
     if (ec) return "destination";
-    if (!bundle) return download_part(destination, entry, stop, progress);
-
-    uint64_t completed = 0;
-    for (const auto& part : bundle->at("parts")) {
-        const auto status = download_part(destination, part, stop, [&](uint64_t bytes) { progress(completed + bytes); });
-        if (status != "ok") return status;
-        completed += part.at("bytes").get<uint64_t>();
-        progress(completed);
-    }
-    return "ok";
+    return download_part(folder, entry, stop, progress);
 }
 
-} // namespace xsr
+} // namespace xsl

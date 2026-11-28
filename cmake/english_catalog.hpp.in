@@ -1,5 +1,5 @@
 #pragma once
 
-namespace xsr {
-inline constexpr char built_in_english_catalog[] = R"xsrlocale(@xsr_english_catalog@)xsrlocale";
+namespace xsl {
+inline constexpr char built_in_english_catalog[] = R"xsrlocale(@xsl_english_catalog@)xsrlocale";
 }

@@ -4,10 +4,17 @@
 #include <imgui.h>
 
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <functional>
+#include <future>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <utility>
 
-namespace xsr {
+namespace xsl {
 
 
 inline constexpr ImGuiChildFlags settings_panel_flags = ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY;
@@ -20,7 +27,7 @@ public:
     explicit Window(std::function<void()> draw, int width = 690, int height = 680,
                     const std::filesystem::path& fallback_font = {},
                     XPLMWindowDecoration decoration = xplm_WindowDecorationRoundRectangle,
-                    bool section_headings = false);
+                    bool section_headings = false, int minimum_width = 0);
     ~Window();
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
@@ -36,6 +43,8 @@ public:
     void set_padding(ImVec2 padding);
     void set_scroll_enabled(bool enabled) { scroll_enabled_ = enabled; }
     void section_heading(const char* text) const;
+    void include_glyphs(std::string_view text);
+    void edit_text(const char* label, const char* hint, std::string& value);
     void set_font_scale(float scale) { font_scale_ = scale; }
     void set_drag_area(int height, int reserved_right = 0) { drag_height_ = height; reserved_right_ = reserved_right; }
     void enable_resize_grips() { resize_grips_ = true; }
@@ -45,18 +54,40 @@ private:
     static void draw_cb(XPLMWindowID window, void* data);
     static int click_cb(XPLMWindowID window, int x, int y, XPLMMouseStatus status, void* data);
     static int wheel_cb(XPLMWindowID window, int x, int y, int wheel, int clicks, void* data);
-    static void key_cb(XPLMWindowID, char, XPLMKeyFlags, char, void*, int) {}
+    static void key_cb(XPLMWindowID, char character, XPLMKeyFlags flags, char key, void* data, int losing_focus);
     static XPLMCursorStatus cursor_cb(XPLMWindowID, int, int, void*) { return xplm_CursorDefault; }
     void position(int x, int y);
     void resize_from_grip(int x, int y);
+    void build_fonts();
+    void update_input_fonts();
+    void start_paste();
+    void poll_clipboard();
+    void show_clipboard_error(const char* key);
+    void draw_clipboard_notice();
     void draw();
 
+    struct InputFont {
+        std::set<ImWchar> glyphs;
+        ImVector<ImWchar> ranges;
+        std::pair<std::filesystem::path, int> font;
+    };
     std::function<void()> draw_content_;
+    std::filesystem::path base_font_, fallback_font_;
+    bool section_headings_;
+    std::array<InputFont, 2> input_fonts_;
+    bool input_fonts_dirty_ = false;
     XPLMWindowID window_ = nullptr;
     ImGuiContext* imgui_ = nullptr;
     ImFont* heading_font_ = nullptr;
+    std::shared_future<bool> clipboard_copy_;
+    std::future<std::optional<std::string>> clipboard_read_;
+    std::optional<std::string> paste_text_;
+    ImGuiID paste_field_ = 0;
+    const char* clipboard_notice_ = nullptr;
+    std::chrono::steady_clock::time_point clipboard_notice_until_{};
     void* texture_ = nullptr;
     bool mouse_down_ = false;
+    bool keyboard_focused_ = false;
     bool dragging_ = false;
     bool resize_grips_ = false;
     bool show_resize_grips_ = true;
@@ -68,4 +99,4 @@ private:
     float frame_time_ = 0;
 };
 
-} // namespace xsr
+} // namespace xsl

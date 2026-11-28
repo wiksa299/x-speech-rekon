@@ -1,0 +1,1279 @@
+diff --git a/docs/extension-kinds.md b/docs/extension-kinds.md
+index c2df730c..0d3749b5 100644
+--- a/docs/extension-kinds.md
++++ b/docs/extension-kinds.md
+@@ -51,6 +51,7 @@ parameter; existing kinds keep their slot for life.
+ | `0x54535256`   | `VRST` | `STREAM` | `TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM`   | voxtral_realtime | `include/transcribe/voxtral_realtime.h` |
+ | `0x54534653`   | `SFST` | `RUN`    | retired in 0.4 (was `TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM`); never reuse | sortformer | - |
+ | `0x52444653`   | `SFDR` | `DIARIZE_RUN` | `TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE`   | sortformer   | `include/transcribe/sortformer.h` |
++| `0x444C5358`   | `XSLD` | `RUN`    | `TRANSCRIBE_EXT_KIND_LISTEN_DECODE`              | parakeet, moonshine_streaming | `include/transcribe/listen.h` |
+ 
+ Empty rows reserved for future allocations:
+ 
+diff --git a/include/transcribe.h b/include/transcribe.h
+index 717b3cc9..da468782 100644
+--- a/include/transcribe.h
++++ b/include/transcribe.h
+@@ -2514,6 +2514,17 @@ TRANSCRIBE_API void transcribe_reset_timings(struct transcribe_session * session
+ 
+ TRANSCRIBE_API const char * transcribe_full_text(const struct transcribe_session * session);
+ 
++/*
++ * Ranked text hypotheses for the current result. Index 0 is
++ * transcribe_full_text(); greedy decoders expose that one hypothesis.
++ * A beam may expose additional distinct, non-empty texts in score order.
++ * After a batch these accessors refer to utterance 0, like full_text.
++ * Return 0 or an empty string for a missing result or invalid index.
++ * Returned strings belong to the session, like transcribe_full_text.
++ */
++TRANSCRIBE_API int          transcribe_n_hypotheses(const struct transcribe_session * session);
++TRANSCRIBE_API const char * transcribe_hypothesis_text(const struct transcribe_session * session, int index);
++
+ /*
+  * The model's decoded output BEFORE family post-processing — inline
+  * diarization markers (moss `[0.48][S01]`, granite `[Speaker N]:`),
+diff --git a/include/transcribe/listen.h b/include/transcribe/listen.h
+new file mode 100644
+index 00000000..8a62c5fa
+--- /dev/null
++++ b/include/transcribe/listen.h
+@@ -0,0 +1,25 @@
++#pragma once
++
++#include <transcribe.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* XSLD: one-shot decoding options for Parakeet and Moonshine Streaming.
++ * Set transcribe_run_params::family to &options.ext. */
++#define TRANSCRIBE_EXT_KIND_LISTEN_DECODE 0x444C5358u
++
++struct transcribe_listen_decode_params {
++    struct transcribe_ext ext;
++    /* 1 selects greedy. 2..4 require a compatible TDT model. */
++    int32_t               beam_width;
++    /* -1 uses the model default, 0 disables vocabulary bias, 0 < x <= 4 sets its strength. */
++    float                 vocabulary_boost;
++};
++
++TRANSCRIBE_API void transcribe_listen_decode_params_init(struct transcribe_listen_decode_params * params);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/arch/moonshine_streaming/decoder.cpp b/src/arch/moonshine_streaming/decoder.cpp
+index 36619195..9a26b1f9 100644
+--- a/src/arch/moonshine_streaming/decoder.cpp
++++ b/src/arch/moonshine_streaming/decoder.cpp
+@@ -467,7 +467,8 @@ DecoderBuild build_decoder_graph_kv(ggml_context *                    ctx,
+                                     int                               n_past,
+                                     int                               T_enc,
+                                     bool                              skip_log_softmax,
+-                                    bool                              use_flash) {
++                                    bool                              use_flash,
++                                    bool                              compute_argmax) {
+     DecoderBuild db{};
+ 
+     if (ctx == nullptr || n_tokens <= 0 || T_enc <= 0) {
+@@ -594,7 +595,7 @@ DecoderBuild build_decoder_graph_kv(ggml_context *                    ctx,
+ 
+     // Backend argmax over the last position when skipping log_softmax —
+     // every step pass downloads a single int32 instead of full vocab logits.
+-    if (skip_log_softmax) {
++    if (skip_log_softmax && compute_argmax) {
+         ggml_tensor * last_logits = logits;
+         if (n_tokens > 1) {
+             const int64_t vocab     = logits->ne[0];
+diff --git a/src/arch/moonshine_streaming/decoder.h b/src/arch/moonshine_streaming/decoder.h
+index 74640477..5882c1f0 100644
+--- a/src/arch/moonshine_streaming/decoder.h
++++ b/src/arch/moonshine_streaming/decoder.h
+@@ -120,7 +120,8 @@ DecoderBuild build_decoder_graph_kv(ggml_context *                    compute_ct
+                                     int                               n_past,
+                                     int                               T_enc,
+                                     bool                              skip_log_softmax = false,
+-                                    bool                              use_flash        = true);
++                                    bool                              use_flash        = true,
++                                    bool                              compute_argmax   = true);
+ 
+ // ---------------------------------------------------------------------------
+ // Offline batched decode (B utterances). Mirrors src/arch/moonshine, with
+diff --git a/src/arch/moonshine_streaming/model.cpp b/src/arch/moonshine_streaming/model.cpp
+index 04e0c384..1dcafb75 100644
+--- a/src/arch/moonshine_streaming/model.cpp
++++ b/src/arch/moonshine_streaming/model.cpp
+@@ -37,6 +37,9 @@
+ #include "transcribe-loader.h"
+ #include "transcribe-log.h"
+ #include "transcribe-meta.h"
++#include "transcribe-phrase-boost.h"
++#include "transcribe-prompting.h"
++#include "transcribe-listen-decode.h"
+ #include "transcribe-repetition-guard.h"
+ #include "transcribe/moonshine_streaming.h"
+ #include "weights.h"
+@@ -260,6 +263,7 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
+     // Publish the advisory window now that the decoder position cap is known
+     // (first point it's available after hparams).
+     m->caps.max_audio_ms = moonshine_streaming_max_audio_ms(m->hparams);
++    set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY, m->tok.model_type() == "bpe");
+ 
+     gguf_init_params init_params{};
+     init_params.no_alloc     = true;
+@@ -952,6 +956,52 @@ transcribe_status commit_cross_kv_from_host(MoonshineStreamingSession *
+     return TRANSCRIBE_OK;
+ }
+ 
++constexpr float k_vocabulary_boost       = 2.0f;
++constexpr float k_initial_token_fraction = 0.30f;
++
++transcribe::PhraseBoost build_vocabulary_boost(const MoonshineStreamingModel & model,
++                                               const transcribe_run_params *   params) {
++    transcribe::PhraseBoost boost;
++    if (params == nullptr || params->n_vocabulary == 0) {
++        return boost;
++    }
++    const float score = transcribe::listen_vocabulary_boost(params, k_vocabulary_boost);
++    if (score == 0.0f) {
++        return boost;
++    }
++
++    std::vector<std::string> spellings;
++    for (const std::string & raw : transcribe::prompting::terms(params)) {
++        std::string term = transcribe::prompting::strip(raw);
++        if (term.empty()) {
++            continue;
++        }
++        spellings.push_back(term);
++        char & initial = term.front();
++        if (initial >= 'a' && initial <= 'z') {
++            initial = static_cast<char>(initial - 'a' + 'A');
++            spellings.push_back(term);
++        } else if (initial >= 'A' && initial <= 'Z') {
++            initial = static_cast<char>(initial - 'A' + 'a');
++            spellings.push_back(term);
++        }
++    }
++
++    std::vector<std::vector<int32_t>> phrases;
++    if (model.tok.encode_sentencepiece_bpe_batch(spellings, phrases, true) != TRANSCRIBE_OK) {
++        return boost;
++    }
++    const auto invalid_id = [&](int32_t id) {
++        return model.tok.is_unknown(id) || model.tok.is_control(id) || id == model.hparams.eos_token_id;
++    };
++    phrases.erase(std::remove_if(
++                      phrases.begin(), phrases.end(),
++                      [&](const auto & ids) { return ids.empty() || std::any_of(ids.begin(), ids.end(), invalid_id); }),
++                  phrases.end());
++    boost.build(phrases, score, score * k_initial_token_fraction);
++    return boost;
++}
++
+ // Greedy AR decoder loop. Assumes the cross-attention slots of the
+ // kv_cache are already populated (cross_populated == true). Mutates
+ // the context result vectors and accumulates wall-clock time into
+@@ -962,8 +1012,6 @@ transcribe_status decode_from_kv_cache(MoonshineStreamingSession *   cc,
+                                        const transcribe_run_params * params,
+                                        bool                          emit_dumps,
+                                        bool                          interim) {
+-    (void) params;
+-
+     if (cc->poll_abort()) {
+         return TRANSCRIBE_ERR_ABORTED;
+     }
+@@ -1009,6 +1057,10 @@ transcribe_status decode_from_kv_cache(MoonshineStreamingSession *   cc,
+     const int dur_budget = decode_generation_budget(hp, T_enc);
+     const int gen_cap    = (dur_budget > 0 && (max_pos <= 0 || dur_budget < max_pos)) ? dur_budget : max_pos;
+ 
++    const auto           boost       = build_vocabulary_boost(*cm, params);
++    const bool           use_boost   = !boost.empty();
++    int                  boost_state = transcribe::PhraseBoost::root;
++    std::vector<float>   logits_host;
+     std::vector<int32_t> generated_ids;
+     int                  next_token = -1;
+     int                  n_past     = 0;
+@@ -1023,7 +1075,7 @@ transcribe_status decode_from_kv_cache(MoonshineStreamingSession *   cc,
+         }
+         const bool   skip_log_softmax = !dump_prompt;
+         DecoderBuild db = build_decoder_graph_kv(cc->compute_ctx, cm->weights, hp, cc->kv_cache, n_tokens, n_past_in,
+-                                                 T_enc, skip_log_softmax, cc->decoder_use_flash);
++                                                 T_enc, skip_log_softmax, cc->decoder_use_flash, !use_boost);
+         if (db.out == nullptr || db.graph == nullptr) {
+             return TRANSCRIBE_ERR_GGUF;
+         }
+@@ -1088,20 +1140,19 @@ transcribe_status decode_from_kv_cache(MoonshineStreamingSession *   cc,
+             ggml_backend_tensor_get(db.argmax_out, &argmax_id, 0, sizeof(int32_t));
+             next_token = argmax_id;
+         } else {
+-            const int64_t      vocab_size = db.out->ne[0];
+-            const int64_t      last_T     = (ggml_n_dims(db.out) == 1) ? 1 : db.out->ne[1];
+-            std::vector<float> logits_host(static_cast<size_t>(vocab_size) * static_cast<size_t>(last_T));
+-            ggml_backend_tensor_get(db.out, logits_host.data(), 0, logits_host.size() * sizeof(float));
+-            const float * last_logits = logits_host.data() + static_cast<size_t>(last_T - 1) * vocab_size;
+-            int           best_idx    = 0;
+-            float         best_v      = last_logits[0];
+-            for (int j = 1; j < static_cast<int>(vocab_size); ++j) {
+-                if (last_logits[j] > best_v) {
+-                    best_v   = last_logits[j];
+-                    best_idx = j;
+-                }
++            const int    vocab_size = static_cast<int>(db.out->ne[0]);
++            const size_t row_bytes  = static_cast<size_t>(vocab_size) * sizeof(float);
++            logits_host.resize(static_cast<size_t>(vocab_size));
++            ggml_backend_tensor_get(db.out, logits_host.data(), static_cast<size_t>(db.out->ne[1] - 1) * db.out->nb[1],
++                                    row_bytes);
++            if (use_boost) {
++                boost.apply(boost_state, logits_host.data(), vocab_size, eos);
++            }
++            next_token =
++                static_cast<int>(std::max_element(logits_host.begin(), logits_host.end()) - logits_host.begin());
++            if (use_boost && next_token != eos) {
++                boost_state = boost.next(boost_state, next_token);
+             }
+-            next_token = best_idx;
+         }
+ 
+         cc->kv_cache.n    = n_past_in + n_tokens;
+@@ -2014,7 +2065,15 @@ void stream_reset(transcribe_session * session) {
+     cc->stream_token_id_history.clear();
+ }
+ 
++transcribe_status run_validate(const transcribe_session * session, const transcribe_run_params * params) {
++    return transcribe::validate_listen_decode(params, false,
++                                             transcribe_model_supports(session->model, TRANSCRIBE_FEATURE_VOCABULARY));
++}
++
+ bool accepts_ext_kind(const transcribe_model * model, transcribe_ext_slot slot, uint32_t kind) {
++    if (slot == TRANSCRIBE_EXT_SLOT_RUN) {
++        return kind == TRANSCRIBE_EXT_KIND_LISTEN_DECODE;
++    }
+     (void) model;
+     if (slot != TRANSCRIBE_EXT_SLOT_STREAM) {
+         return false;
+@@ -2051,7 +2110,8 @@ transcribe_status run_batch(transcribe_session *          session,
+     const bool primary_is_gpu = cm->plan.primary_kind != transcribe::BackendKind::Cpu &&
+                                 cm->plan.primary_kind != transcribe::BackendKind::Accel &&
+                                 cm->plan.primary_kind != transcribe::BackendKind::Unknown;
+-    if (n == 1 || !primary_is_gpu || transcribe::debug::enabled()) {
++    const bool has_vocabulary = params != nullptr && params->n_vocabulary > 0;
++    if (n == 1 || !primary_is_gpu || has_vocabulary || transcribe::debug::enabled()) {
+         return run_batch_serial(cc, pcm, n_samples, n, params);
+     }
+ 
+@@ -2425,6 +2485,7 @@ extern const Arch arch = {
+     /* .stream_finalize  = */ stream_finalize,
+     /* .stream_reset     = */ stream_reset,
+     /* .accepts_ext_kind = */ accepts_ext_kind,
++    /* .run_validate   = */ run_validate,
+ };
+ 
+ }  // namespace transcribe::moonshine_streaming
+diff --git a/src/arch/parakeet/decoder.cpp b/src/arch/parakeet/decoder.cpp
+index d711bf3f..b7bd1e5c 100644
+--- a/src/arch/parakeet/decoder.cpp
++++ b/src/arch/parakeet/decoder.cpp
+@@ -45,6 +45,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <memory>
+ #include <utility>
+ #include <vector>
+ 
+@@ -1260,6 +1261,267 @@ transcribe_status decode_tdt_greedy(const HostDecoderWeights &      w,
+     return TRANSCRIBE_OK;
+ }
+ 
++// Experimental offline TDT beam for the cockpit benchmark.
++namespace {
++
++struct BeamPredictor {
++    int                              token = -1;
++    std::shared_ptr<const LstmState> before;
++    std::shared_ptr<LstmState>       after;
++};
++
++struct BeamPath {
++    std::shared_ptr<BeamPredictor> predictor;
++    std::vector<TdtToken>          tokens;
++    float                          score            = 0.0f;
++    int                            boost_state      = transcribe::PhraseBoost::root;
++    int                            symbols_on_frame = 0;
++};
++
++bool same_prefix(const BeamPath & a, const BeamPath & b) {
++    return a.symbols_on_frame == b.symbols_on_frame && a.tokens.size() == b.tokens.size() &&
++           std::equal(a.tokens.begin(), a.tokens.end(), b.tokens.begin(),
++                      [](const auto & x, const auto & y) { return x.id == y.id; });
++}
++
++template <typename Score> void keep_path(std::vector<BeamPath> & paths, BeamPath next, size_t width, Score score) {
++    if (!std::isfinite(next.score)) {
++        return;
++    }
++    auto it = std::find_if(paths.begin(), paths.end(), [&](const auto & p) { return same_prefix(p, next); });
++    if (it != paths.end()) {
++        if (score(*it) < score(next)) {
++            *it = std::move(next);
++        }
++        return;
++    }
++    if (paths.size() == width) {
++        it = std::min_element(paths.begin(), paths.end(),
++                              [&](const auto & x, const auto & y) { return score(x) < score(y); });
++        if (score(*it) < score(next)) {
++            *it = std::move(next);
++        }
++    } else {
++        paths.push_back(std::move(next));
++    }
++}
++
++float log_normalizer(const float * logits, int count) {
++    float  max_logit = *std::max_element(logits, logits + count);
++    double sum       = 0.0;
++    for (int i = 0; i < count; ++i) {
++        sum += std::exp(logits[i] - max_logit);
++    }
++    return max_logit + static_cast<float>(std::log(sum));
++}
++
++}  // namespace
++
++transcribe_status decode_tdt_beam(transcribe_session &                 session,
++                                  const HostDecoderWeights &           w,
++                                  const float *                        enc_out,
++                                  int                                  frames,
++                                  int                                  d_enc,
++                                  int                                  n_threads,
++                                  int                                  beam_width,
++                                  std::vector<TdtToken> &              out_tokens,
++                                  std::vector<std::vector<TdtToken>> & out_alternatives,
++                                  const transcribe::PhraseBoost *      boost) {
++    if (!enc_out || frames <= 0 || d_enc != w.joint.d_enc || beam_width < 2 || beam_width > 4 ||
++        w.tdt_durations.empty() || w.tdt_global_symbol_budget) {
++        return TRANSCRIBE_ERR_INVALID_ARG;
++    }
++    if (std::any_of(w.tdt_durations.begin(), w.tdt_durations.end(), [](int d) { return d < 0; })) {
++        return TRANSCRIBE_ERR_INVALID_ARG;
++    }
++    if (boost && boost->empty()) {
++        boost = nullptr;
++    }
++
++    if (session.poll_abort()) {
++        return TRANSCRIBE_ERR_ABORTED;
++    }
++
++    const int n_layers       = static_cast<int>(w.predictor.lstm.size());
++    const int hidden         = w.predictor.pred_hidden;
++    const int token_count    = w.predictor.pred_vocab;
++    const int duration_count = static_cast<int>(w.tdt_durations.size());
++    const int blank          = w.blank_id;
++    const int max_symbols    = w.tdt_max_symbols > 0 ? w.tdt_max_symbols : 10;
++
++    PredGraph  pg;
++    JointGraph jg;
++    build_pred_graph(pg, w.predictor, resolve_decode_threads(n_threads));
++    if (pg.ready) {
++        build_joint_graph(jg, w.joint, pg.backend);
++    }
++    if (!pg.ready || !jg.ready) {
++        return TRANSCRIBE_ERR_BACKEND;
++    }
++    std::vector<float> enc_proj;
++    if (!precompute_enc_proj_ggml(w.joint, pg.backend, enc_out, frames, d_enc, enc_proj)) {
++        return TRANSCRIBE_ERR_BACKEND;
++    }
++
++    auto initial = std::make_shared<LstmState>();
++    initial->reset(n_layers, hidden);
++    std::vector<std::vector<BeamPath>> pending(static_cast<size_t>(frames));
++    std::vector<BeamPath>              completed;
++    BeamPath                           root;
++    root.predictor         = std::make_shared<BeamPredictor>();
++    root.predictor->before = std::move(initial);
++    pending[0].push_back(std::move(root));
++
++    auto raw_score = [](const BeamPath & path) {
++        return path.score;
++    };
++    auto normalized = [](const BeamPath & path) {
++        return path.score / (path.tokens.size() + 1);
++    };
++    auto place = [&](int frame, BeamPath path) {
++        if (frame < frames) {
++            keep_path(pending[frame], std::move(path), beam_width, raw_score);
++        } else {
++            if (boost) {
++                path.score -= boost->unfinished_bonus(path.boost_state);
++            }
++            path.symbols_on_frame = 0;
++            keep_path(completed, std::move(path), beam_width, normalized);
++        }
++    };
++    std::vector<float> scratch_x, logits, boosted, scratch_probs;
++    std::vector<int>   tokens(static_cast<size_t>(token_count - 1));
++    for (int i = 0, index = 0; i < token_count; ++i) {
++        if (i != blank) {
++            tokens[index++] = i;
++        }
++    }
++    std::vector<int> durations(static_cast<size_t>(duration_count));
++    for (int i = 0; i < duration_count; ++i) {
++        durations[i] = i;
++    }
++    const int duration_width = std::min(beam_width, duration_count);
++    const int token_width    = std::min(beam_width, token_count - 1);
++
++    constexpr float score_window = 8.0f;
++    for (int frame = 0; frame < frames; ++frame) {
++        if (session.poll_abort()) {
++            return TRANSCRIBE_ERR_ABORTED;
++        }
++        float best_frame_score = -std::numeric_limits<float>::infinity();
++        while (!pending[frame].empty()) {
++            auto paths = std::move(pending[frame]);
++            pending[frame].clear();
++            for (const auto & path : paths) {
++                best_frame_score = std::max(best_frame_score, path.score);
++                if (path.score < best_frame_score - score_window) {
++                    continue;
++                }
++                auto & pred = *path.predictor;
++                if (!pred.after) {
++                    pred.after = std::make_shared<LstmState>();
++                    pred.after->reset(n_layers, hidden);
++                    if (!predictor_step_ggml(w.predictor, pg, pred.token, *pred.before, *pred.after, scratch_x)) {
++                        return TRANSCRIBE_ERR_BACKEND;
++                    }
++                }
++                if (!joint_step(w.joint, jg, enc_proj.data() + static_cast<size_t>(frame) * w.joint.joint_h,
++                                pred.after->h.back().data(), logits)) {
++                    return TRANSCRIBE_ERR_BACKEND;
++                }
++                const float * raw      = logits.data();
++                const float * dur      = raw + token_count;
++                const float   norm     = log_normalizer(raw, token_count);
++                const float   dur_norm = log_normalizer(dur, duration_count);
++                if (!std::isfinite(norm) || !std::isfinite(dur_norm)) {
++                    return TRANSCRIBE_ERR_BACKEND;
++                }
++                auto duration_order = [&](int a, int b) {
++                    return dur[a] == dur[b] ? a < b : dur[a] > dur[b];
++                };
++                std::partial_sort(durations.begin(), durations.begin() + duration_width, durations.end(),
++                                  duration_order);
++
++                bool sent_blank = false;
++                for (int i = 0; i < duration_width; ++i) {
++                    int d = durations[i];
++                    if (w.tdt_durations[d] <= 0) {
++                        continue;
++                    }
++                    BeamPath next = path;
++                    next.score += raw[blank] - norm + dur[d] - dur_norm;
++                    next.symbols_on_frame = 0;
++                    place(frame + w.tdt_durations[d], std::move(next));
++                    sent_blank = true;
++                }
++                if (!sent_blank) {
++                    int best = -1;
++                    for (int i = 0; i < duration_count; ++i) {
++                        if (w.tdt_durations[i] > 0 && (best < 0 || duration_order(i, best))) {
++                            best = i;
++                        }
++                    }
++                    BeamPath next = path;
++                    next.score += raw[blank] - norm + (best < 0 ? 0.0f : dur[best] - dur_norm);
++                    next.symbols_on_frame = 0;
++                    place(frame + (best < 0 ? 1 : w.tdt_durations[best]), std::move(next));
++                }
++
++                const float * ranked = raw;
++                if (boost) {
++                    boosted.assign(raw, raw + token_count);
++                    boost->apply(path.boost_state, boosted.data(), token_count, blank);
++                    ranked = boosted.data();
++                }
++                std::partial_sort(tokens.begin(), tokens.begin() + token_width, tokens.end(),
++                                  [&](int a, int b) { return ranked[a] == ranked[b] ? a < b : ranked[a] > ranked[b]; });
++                const float confidence = token_confidence(raw, token_count, scratch_probs);
++                for (int i = 0; i < token_width; ++i) {
++                    const int   token     = tokens[i];
++                    const float bonus     = boost ? boost->delta(path.boost_state, token) : 0.0f;
++                    auto        next_pred = std::make_shared<BeamPredictor>();
++                    next_pred->token      = token;
++                    next_pred->before     = pred.after;
++                    for (int j = 0; j < duration_width; ++j) {
++                        const int d    = durations[j];
++                        const int step = w.tdt_durations[d];
++                        BeamPath  next = path;
++                        next.predictor = next_pred;
++                        next.score += raw[token] - norm + bonus + dur[d] - dur_norm;
++                        TdtToken emitted;
++                        emitted.id              = token;
++                        emitted.p               = confidence;
++                        emitted.step_at_emit    = frame;
++                        emitted.duration_frames = step;
++                        next.tokens.push_back(emitted);
++                        if (boost) {
++                            next.boost_state = boost->next(next.boost_state, token);
++                        }
++                        next.symbols_on_frame = step == 0 ? next.symbols_on_frame + 1 : 0;
++                        int target            = frame + step;
++                        if (next.symbols_on_frame >= max_symbols) {
++                            ++target;
++                            next.symbols_on_frame = 0;
++                        }
++                        place(target, std::move(next));
++                    }
++                }
++            }
++        }
++    }
++    if (completed.empty()) {
++        return TRANSCRIBE_ERR_BACKEND;
++    }
++    std::stable_sort(completed.begin(), completed.end(),
++                     [&](const auto & a, const auto & b) { return normalized(a) > normalized(b); });
++    out_tokens = std::move(completed.front().tokens);
++    out_alternatives.clear();
++    for (size_t i = 1; i < completed.size(); ++i) {
++        out_alternatives.push_back(std::move(completed[i].tokens));
++    }
++    return TRANSCRIBE_OK;
++}
++
+ // ---------------------------------------------------------------------------
+ // RNNT greedy decode
+ // ---------------------------------------------------------------------------
+diff --git a/src/arch/parakeet/decoder.h b/src/arch/parakeet/decoder.h
+index b05609c8..06ad10bf 100644
+--- a/src/arch/parakeet/decoder.h
++++ b/src/arch/parakeet/decoder.h
+@@ -223,6 +223,17 @@ struct TdtToken {
+ // `boost`, when non-null and non-empty, biases the token argmax toward the
+ // caller's vocabulary terms (transcribe_run_params::vocabulary); see
+ // transcribe-phrase-boost.h. Token confidences stay the model's own.
++transcribe_status decode_tdt_beam(transcribe_session &                 session,
++                                  const HostDecoderWeights &           w,
++                                  const float *                        enc_out,
++                                  int                                  frames,
++                                  int                                  d_enc,
++                                  int                                  n_threads,
++                                  int                                  beam_width,
++                                  std::vector<TdtToken> &              out_tokens,
++                                  std::vector<std::vector<TdtToken>> & out_alternatives,
++                                  const transcribe::PhraseBoost *      boost);
++
+ transcribe_status decode_tdt_greedy(const HostDecoderWeights &      w,
+                                     const float *                   enc_out,
+                                     int                             T_enc,
+diff --git a/src/arch/parakeet/encoder.cpp b/src/arch/parakeet/encoder.cpp
+index ba0e6253..49202a77 100644
+--- a/src/arch/parakeet/encoder.cpp
++++ b/src/arch/parakeet/encoder.cpp
+@@ -401,6 +401,22 @@ EncoderBuild build_encoder_graph(ggml_context *                     ctx,
+         // build_pre_encode already logged the diagnostic.
+         return eb;
+     }
++    if (w.fluid.norm_w != nullptr) {
++        const auto & f = w.fluid;
++        auto * y = conf::layer_norm(ctx, x, f.norm_w, f.norm_b);
++        y = ggml_add(ctx, ggml_mul_mat(ctx, f.down_w, y), f.down_b);
++        if (pe_masks.mask_s3 != nullptr) {
++            // Keep the projection bias out of the padded temporal tail.
++            auto * mask = ggml_reshape_3d(ctx, pe_masks.mask_s3, 1, y->ne[1], y->ne[2]);
++            y = ggml_mul(ctx, y, mask);
++        }
++        y = ggml_cont(ctx, ggml_transpose(ctx, y));
++        y = conf::conv_1d_dw_f32(ctx, f.mix_w, y, 1, ParakeetFluidInsert::kernel_size / 2, 1);
++        y = ggml_add(ctx, ggml_cont(ctx, ggml_transpose(ctx, y)), f.mix_b);
++        y = ggml_gelu_erf(ctx, y);
++        y = ggml_add(ctx, ggml_mul_mat(ctx, f.up_w, y), f.up_b);
++        x = ggml_add(ctx, x, y);
++    }
+     eb.dumps.pre_encode_out = x;
+     transcribe::debug::mark_tensor_for_dump(x);
+ 
+diff --git a/src/arch/parakeet/model.cpp b/src/arch/parakeet/model.cpp
+index 8ade1bb1..c3afd835 100644
+--- a/src/arch/parakeet/model.cpp
++++ b/src/arch/parakeet/model.cpp
+@@ -29,6 +29,7 @@
+ #include "transcribe-mel.h"
+ #include "transcribe-meta.h"
+ #include "transcribe-prompting.h"
++#include "transcribe-listen-decode.h"
+ #include "transcribe/parakeet.h"
+ #include "weights.h"
+ 
+@@ -826,46 +827,47 @@ static std::string flip_first_letter(const std::string & term) {
+ static const transcribe::PhraseBoost * vocabulary_boost(ParakeetSession *             pc,
+                                                         const ParakeetModel *         pm,
+                                                         const transcribe_run_params * params) {
+-    std::vector<std::string> terms = transcribe::prompting::terms(params);
+-    if (terms.empty() || pm->host_decoder.head_kind == HostHeadKind::CTC) {
++    const float weight = transcribe::listen_vocabulary_boost(params, kVocabularyBoost);
++    if (weight == 0.0f || pm->host_decoder.head_kind == HostHeadKind::CTC) {
+         return nullptr;
+     }
+-    if (terms != pc->boost_terms || pc->boost.empty()) {
++    std::vector<std::string> terms = transcribe::prompting::terms(params);
++    if (terms.empty()) {
++        return nullptr;
++    }
++    if (terms != pc->boost_terms || weight != pc->boost_weight) {
++        std::vector<std::string> spellings = terms;
++        for (const auto & term : terms) {
++            spellings.push_back(flip_first_letter(term));
++        }
++        std::vector<std::vector<int32_t>> encoded;
++        if (pm->tok.encode_sentencepiece_bpe_batch(spellings, encoded, true) != TRANSCRIBE_OK) {
++            log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
++                    "parakeet: this tokenizer cannot encode vocabulary terms; ignoring them");
++            return nullptr;
++        }
++
+         std::vector<std::vector<int32_t>> phrases;
+-        for (const std::string & term : terms) {
+-            std::vector<int32_t> ids;
+-            if (pm->tok.encode_sentencepiece_bpe(term, ids, 0, -1, /*remove_extra_whitespaces=*/true) !=
+-                TRANSCRIBE_OK) {
++        auto                              unknown = [&](int32_t id) {
++            return pm->tok.is_unknown(id);
++        };
++        for (size_t i = 0; i < terms.size(); ++i) {
++            auto & ids = encoded[i];
++            if (std::any_of(ids.begin(), ids.end(), unknown)) {
+                 log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+-                        "parakeet: this tokenizer cannot encode vocabulary terms; ignoring them");
+-                return nullptr;
+-            }
+-            bool unknown = false;
+-            for (const int32_t id : ids) {
+-                unknown = unknown || pm->tok.is_unknown(id);
+-            }
+-            if (unknown) {
+-                log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+-                        "parakeet: vocabulary term '%s' has characters the model cannot write; skipped", term.c_str());
++                        "parakeet: vocabulary term '%s' has characters the model cannot write; skipped",
++                        terms[i].c_str());
+                 continue;
+             }
+             phrases.push_back(std::move(ids));
+-
+-            const std::string flipped = flip_first_letter(term);
+-            if (!flipped.empty() &&
+-                pm->tok.encode_sentencepiece_bpe(flipped, ids, 0, -1,
+-                                                 /*remove_extra_whitespaces=*/true) == TRANSCRIBE_OK) {
+-                bool flipped_unknown = false;
+-                for (const int32_t id : ids) {
+-                    flipped_unknown = flipped_unknown || pm->tok.is_unknown(id);
+-                }
+-                if (!flipped_unknown) {
+-                    phrases.push_back(std::move(ids));
+-                }
++            auto & flipped = encoded[i + terms.size()];
++            if (!flipped.empty() && std::none_of(flipped.begin(), flipped.end(), unknown)) {
++                phrases.push_back(std::move(flipped));
+             }
+         }
+-        pc->boost.build(phrases, kVocabularyBoost);
+-        pc->boost_terms = std::move(terms);
++        pc->boost.build(phrases, weight);
++        pc->boost_weight = weight;
++        pc->boost_terms  = std::move(terms);
+     }
+     return pc->boost.empty() ? nullptr : &pc->boost;
+ }
+@@ -903,14 +905,25 @@ static transcribe_status decode_and_populate(ParakeetSession *             pc,
+     }
+ 
+     pc->raw_tokens.clear();
+-    const int64_t t_dec_start = ggml_time_us();
++    std::vector<std::vector<TdtToken>> alternatives;
++    const int64_t                      t_dec_start = ggml_time_us();
+     {
+         transcribe_status st = TRANSCRIBE_OK;
+         switch (pm->host_decoder.head_kind) {
+             case HostHeadKind::TDT:
+-                st = decode_tdt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens,
+-                                       vocabulary_boost(pc, pm, params));
+-                break;
++                {
++                    const auto * options = transcribe::listen_decode_params(params);
++                    const int    width   = options ? options->beam_width : 1;
++                    const auto * bias    = vocabulary_boost(pc, pm, params);
++                    if (width >= 2 && width <= 4) {
++                        st = decode_tdt_beam(*pc, pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, width,
++                                             pc->raw_tokens, alternatives, bias);
++                    } else {
++                        st =
++                            decode_tdt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens, bias);
++                    }
++                    break;
++                }
+             case HostHeadKind::RNNT:
+                 st = decode_rnnt_greedy(pm->host_decoder, enc, T_enc, d_enc, pc->n_threads, pc->raw_tokens,
+                                         vocabulary_boost(pc, pm, params));
+@@ -923,8 +936,33 @@ static transcribe_status decode_and_populate(ParakeetSession *             pc,
+             return st;
+         }
+     }
+-    pc->t_decode_us = ggml_time_us() - t_dec_start;
+-    return build_result_from_raw_tokens(pc, pm, params);
++    pc->t_decode_us   = ggml_time_us() - t_dec_start;
++    const auto status = build_result_from_raw_tokens(pc, pm, params);
++    if (status != TRANSCRIBE_OK) {
++        return status;
++    }
++
++    const bool       strip_tags = params == nullptr || !params->keep_special_tags;
++    std::vector<int> ids;
++    for (const auto & alternative : alternatives) {
++        ids.clear();
++        for (const auto & token : alternative) {
++            if (!strip_tags || !is_strippable_special(pm->tok, token.id)) {
++                ids.push_back(token.id);
++            }
++        }
++        if (ids.empty()) {
++            continue;
++        }
++        std::string text = pm->tok.decode(ids.data(), static_cast<int>(ids.size()));
++        normalize_transcript_whitespace(text);
++        const auto & previous = pc->alternative_texts;
++        if (!text.empty() && text != pc->full_text &&
++            std::find(previous.begin(), previous.end(), text) == previous.end()) {
++            pc->alternative_texts.push_back(std::move(text));
++        }
++    }
++    return TRANSCRIBE_OK;
+ }
+ 
+ }  // namespace
+@@ -3981,13 +4019,21 @@ void stream_reset(transcribe_session * session) {
+     pc->stream_audio_input_samples = 0;
+ }
+ 
+-// Kind+slot probe. No run-slot extensions (always false on _RUN). On
+-// _STREAM: ChunkedLimited takes PARAKEET_STREAM, ChunkedLimitedWithRc
+-// takes PARAKEET_BUFFERED_STREAM, offline variants neither.
++transcribe_status run_validate(const transcribe_session * session, const transcribe_run_params * params) {
++    const auto * model   = static_cast<const ParakeetModel *>(session->model);
++    const auto & weights = model->host_decoder;
++    const bool   supports_beam =
++        weights.head_kind == HostHeadKind::TDT && !weights.tdt_global_symbol_budget && !weights.tdt_durations.empty();
++    return transcribe::validate_listen_decode(params, supports_beam, weights.head_kind != HostHeadKind::CTC);
++}
++
+ bool accepts_ext_kind(const transcribe_model * model, transcribe_ext_slot slot, uint32_t kind) {
+     if (model == nullptr) {
+         return false;
+     }
++    if (slot == TRANSCRIBE_EXT_SLOT_RUN) {
++        return kind == TRANSCRIBE_EXT_KIND_LISTEN_DECODE;
++    }
+     if (slot != TRANSCRIBE_EXT_SLOT_STREAM) {
+         return false;
+     }
+@@ -4019,6 +4065,7 @@ extern const Arch arch = {
+     /* .stream_finalize  = */ stream_finalize,
+     /* .stream_reset     = */ stream_reset,
+     /* .accepts_ext_kind = */ accepts_ext_kind,
++    /* .run_validate   = */ run_validate,
+ };
+ 
+ }  // namespace transcribe::parakeet
+diff --git a/src/arch/parakeet/parakeet.h b/src/arch/parakeet/parakeet.h
+index 9d2fee81..1b0a26dc 100644
+--- a/src/arch/parakeet/parakeet.h
++++ b/src/arch/parakeet/parakeet.h
+@@ -320,6 +320,7 @@ struct ParakeetSession final : public transcribe_session {
+     std::vector<TdtToken>    raw_tokens;
+     // Vocabulary biasing, rebuilt only when the run's terms change.
+     std::vector<std::string> boost_terms;
++    float                    boost_weight = -1.0f;
+     transcribe::PhraseBoost  boost;
+ 
+     // Multitalker bundle scratch: streaming-diarizer AOSC/FIFO state for
+diff --git a/src/arch/parakeet/weights.cpp b/src/arch/parakeet/weights.cpp
+index 4247ec7c..00d857e6 100644
+--- a/src/arch/parakeet/weights.cpp
++++ b/src/arch/parakeet/weights.cpp
+@@ -850,15 +850,35 @@ constexpr const char * kTag = kFamilyTag;
+         (slot) = _t;                                                                                           \
+     } while (0)
+ 
+-#define GET_LIN(slot, name, ...)                                                                                 \
+-    do {                                                                                                         \
+-        ggml_tensor * _t = transcribe::weights::find_tensor(ctx_meta, (name), { TRANSCRIBE_QUANT_LINEAR_TYPES }, \
+-                                                            { __VA_ARGS__ }, kTag);                              \
+-        if (_t == nullptr)                                                                                       \
+-            return TRANSCRIBE_ERR_GGUF;                                                                          \
+-        (slot) = _t;                                                                                             \
++#define GET_LIN(slot, name, ...)                                                                         \
++    do {                                                                                                 \
++        ggml_tensor * _t = transcribe::weights::find_tensor(                                             \
++            ctx_meta, (name), { TRANSCRIBE_QUANT_LINEAR_TYPES, GGML_TYPE_Q2_K }, { __VA_ARGS__ }, kTag); \
++        if (_t == nullptr)                                                                               \
++            return TRANSCRIBE_ERR_GGUF;                                                                  \
++        (slot) = _t;                                                                                     \
+     } while (0)
+ 
++// Pointwise coefficients may be stored as a packed [input, output] matrix.
++static ggml_tensor * pointwise(ggml_context * ctx, const char * name, int64_t input, int64_t output) {
++    auto * tensor = ggml_get_tensor(ctx, name);
++    if (tensor && ggml_is_quantized(tensor->type)) {
++        return transcribe::weights::find_tensor(
++            ctx, name, { GGML_TYPE_Q2_K, GGML_TYPE_Q4_K, GGML_TYPE_Q8_0 }, { input, output }, kTag);
++    }
++    return transcribe::weights::find_tensor(ctx, name, { TRANSCRIBE_QUANT_CONV_TYPES }, { 1, input, output }, kTag);
++}
++
++static bool has_fluid_insert(ggml_context * ctx) {
++    constexpr char prefix[] = "enc.fluid.";
++    for (auto * tensor = ggml_get_first_tensor(ctx); tensor; tensor = ggml_get_next_tensor(ctx, tensor)) {
++        if (std::strncmp(ggml_get_name(tensor), prefix, sizeof(prefix) - 1) == 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ }  // namespace
+ 
+ transcribe_status build_parakeet_weights(ggml_context *          ctx_meta,
+@@ -918,6 +938,22 @@ transcribe_status build_parakeet_weights(ggml_context *          ctx_meta,
+     GET_LIN(weights.pre_encode.out_w, "enc.pre_encode.out.weight", pre_encode_in, d_model);
+     GET_F32(weights.pre_encode.out_b, "enc.pre_encode.out.bias", d_model);
+ 
++    if (has_fluid_insert(ctx_meta)) {
++        if (hp.head_kind != HeadKind::TDT || hp.enc_att_context_style != ParakeetHParams::AttContextStyle::Regular) {
++            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "parakeet: Fluid residual block requires an offline TDT model");
++            return TRANSCRIBE_ERR_GGUF;
++        }
++        auto & f = weights.fluid;
++        GET_F32(f.norm_w, "enc.fluid.norm.weight", d_model);
++        GET_F32(f.norm_b, "enc.fluid.norm.bias", d_model);
++        GET_LIN(f.down_w, "enc.fluid.down.weight", d_model, d_model);
++        GET_F32(f.down_b, "enc.fluid.down.bias", d_model);
++        GET_CONV(f.mix_w, "enc.fluid.mix.weight", ParakeetFluidInsert::kernel_size, 1, d_model);
++        GET_F32(f.mix_b, "enc.fluid.mix.bias", d_model);
++        GET_LIN(f.up_w, "enc.fluid.up.weight", d_model, d_model);
++        GET_F32(f.up_b, "enc.fluid.up.bias", d_model);
++    }
++
+     // ----- encoder blocks -----
+     weights.blocks.assign(hp.enc_n_layers, ParakeetBlock{});
+     for (int i = 0; i < hp.enc_n_layers; ++i) {
+@@ -949,9 +985,15 @@ transcribe_status build_parakeet_weights(ggml_context *          ctx_meta,
+         // back to d_model.
+         GET_F32(b.norm_conv_w, lname("enc.blocks.%d.norm_conv.weight", i), d_model);
+         GET_F32(b.norm_conv_b, lname("enc.blocks.%d.norm_conv.bias", i), d_model);
+-        GET_CONV(b.conv_pw1_w, lname("enc.blocks.%d.conv.pointwise1.weight", i), 1, d_model, 2 * d_model);
++        b.conv_pw1_w = pointwise(ctx_meta, lname("enc.blocks.%d.conv.pointwise1.weight", i), d_model, 2 * d_model);
++        if (b.conv_pw1_w == nullptr) {
++            return TRANSCRIBE_ERR_GGUF;
++        }
+         GET_CONV(b.conv_dw_w, lname("enc.blocks.%d.conv.depthwise.weight", i), k, 1, d_model);
+-        GET_CONV(b.conv_pw2_w, lname("enc.blocks.%d.conv.pointwise2.weight", i), 1, d_model, d_model);
++        b.conv_pw2_w = pointwise(ctx_meta, lname("enc.blocks.%d.conv.pointwise2.weight", i), d_model, d_model);
++        if (b.conv_pw2_w == nullptr) {
++            return TRANSCRIBE_ERR_GGUF;
++        }
+         GET_F32(b.conv_bn_w, lname("enc.blocks.%d.conv.bn.weight", i), d_model);
+         GET_F32(b.conv_bn_b, lname("enc.blocks.%d.conv.bn.bias", i), d_model);
+         if (hp.enc_conv_norm_type == ParakeetHParams::ConvNormType::BatchNorm) {
+diff --git a/src/arch/parakeet/weights.h b/src/arch/parakeet/weights.h
+index 885dfea5..1077806e 100644
+--- a/src/arch/parakeet/weights.h
++++ b/src/arch/parakeet/weights.h
+@@ -414,6 +414,18 @@ struct ParakeetVadHead {
+     ggml_tensor * out_b  = nullptr;  // [1]
+ };
+ 
++struct ParakeetFluidInsert {
++    static constexpr int kernel_size = 15;
++    ggml_tensor * norm_w = nullptr;
++    ggml_tensor * norm_b = nullptr;
++    ggml_tensor * down_w = nullptr;
++    ggml_tensor * down_b = nullptr;
++    ggml_tensor * mix_w  = nullptr;
++    ggml_tensor * mix_b  = nullptr;
++    ggml_tensor * up_w   = nullptr;
++    ggml_tensor * up_b   = nullptr;
++};
++
+ struct ParakeetWeights {
+     ParakeetPreEncode              pre_encode;
+     std::vector<ParakeetBlock>     blocks;       // hp.enc_n_layers entries
+@@ -423,6 +435,7 @@ struct ParakeetWeights {
+     ParakeetPromptMlp              prompt;       // populated when hp.has_prompt
+     std::vector<ParakeetSpkKernel> spk_kernels;  // populated when hp.has_spk_kernel
+     ParakeetVadHead                vad;          // populated when hp.has_vad_head
++    ParakeetFluidInsert            fluid;        // optional residual block after subsampling
+ };
+ 
+ // Walk the canonical tensor list, look up each tensor by name, validate
+diff --git a/src/conformer/conformer.cpp b/src/conformer/conformer.cpp
+index 9b6c2ded..4cca70e4 100644
+--- a/src/conformer/conformer.cpp
++++ b/src/conformer/conformer.cpp
+@@ -367,7 +367,9 @@ ggml_tensor * conv_module(ggml_context * ctx, ggml_tensor * x, const BlockView &
+     // conv_pad_mask no longer broadcasts and ggml aborts. Force the
+     // batch-aware direct path at B > 1 regardless of backend policy or
+     // TRANSCRIBE_CONV_NO_DIRECT_PW (correctness beats the perf override).
+-    const bool direct_pw = policy.direct_pw || B > 1;
++    const bool packed_pw1 = ggml_is_quantized(b.conv_pw1_w->type);
++    const bool packed_pw2 = ggml_is_quantized(b.conv_pw2_w->type);
++    const bool direct_pw  = policy.direct_pw || B > 1 || packed_pw1 || packed_pw2;
+ 
+     if (direct_pw) {
+         // Pointwise conv 1 as direct mul_mat in [d_model, T, B] layout.
+@@ -375,7 +377,7 @@ ggml_tensor * conv_module(ggml_context * ctx, ggml_tensor * x, const BlockView &
+         // Force F32 accumulation for F16 weights (see mul_mat_f32acc in
+         // causal_lm.cpp for the CUDA COMPUTE_16F saturation rationale).
+         {
+-            ggml_tensor * pw1 = ggml_reshape_2d(ctx, b.conv_pw1_w, d_model, 2 * d_model);
++            ggml_tensor * pw1 = packed_pw1 ? b.conv_pw1_w : ggml_reshape_2d(ctx, b.conv_pw1_w, d_model, 2 * d_model);
+             x                 = ggml_mul_mat(ctx, pw1, x);  // [2*d_model, T, B]
+             if (b.conv_pw1_w->type == GGML_TYPE_F16) {
+                 ggml_prec_set_acc(x, GGML_PREC_F32);
+@@ -527,7 +529,7 @@ ggml_tensor * conv_module(ggml_context * ctx, ggml_tensor * x, const BlockView &
+ 
+         // Pointwise conv 2 as direct mul_mat in [d_model, T] layout. See
+         // the pw1 comment above for the F16 / CUDA COMPUTE_16F rationale.
+-        ggml_tensor * pw2 = ggml_reshape_2d(ctx, b.conv_pw2_w, d_model, d_model);
++        ggml_tensor * pw2 = packed_pw2 ? b.conv_pw2_w : ggml_reshape_2d(ctx, b.conv_pw2_w, d_model, d_model);
+         x                 = ggml_mul_mat(ctx, pw2, x);
+         if (b.conv_pw2_w->type == GGML_TYPE_F16) {
+             ggml_prec_set_acc(x, GGML_PREC_F32);
+diff --git a/src/transcribe-asr.cpp b/src/transcribe-asr.cpp
+index ffbfa0c2..05d92774 100644
+--- a/src/transcribe-asr.cpp
++++ b/src/transcribe-asr.cpp
+@@ -25,6 +25,7 @@
+ #include "transcribe-session.h"
+ #include "transcribe-tokenizer.h"
+ #include "transcribe.h"
++#include "transcribe/listen.h"
+ 
+ #include <algorithm>
+ #include <climits>
+@@ -303,6 +304,17 @@ extern "C" void transcribe_session_params_init(struct transcribe_session_params
+     transcribe::init_sized(p);
+ }
+ 
++extern "C" void transcribe_listen_decode_params_init(struct transcribe_listen_decode_params * params) {
++    if (params == nullptr) {
++        return;
++    }
++    *params                  = {};
++    params->ext.size         = sizeof(*params);
++    params->ext.kind         = TRANSCRIBE_EXT_KIND_LISTEN_DECODE;
++    params->beam_width       = 1;
++    params->vocabulary_boost = -1.0f;
++}
++
+ extern "C" void transcribe_run_params_init(struct transcribe_run_params * p) {
+     if (p == nullptr) {
+         return;
+@@ -1532,6 +1544,7 @@ void restore_scratch_from_result(transcribe_session * s, const transcribe_sessio
+     s->segments          = rs.segments;
+     s->speaker_segments  = rs.speaker_segments;
+     s->full_text         = rs.full_text;
++    s->alternative_texts = rs.alternative_texts;
+     s->raw_text          = rs.raw_text;
+     s->detected_language = rs.detected_language;
+     s->result_kind       = rs.result_kind;
+@@ -1873,6 +1886,17 @@ extern "C" const char * transcribe_full_text(const struct transcribe_session * s
+     return session->full_text.c_str();
+ }
+ 
++extern "C" int transcribe_n_hypotheses(const struct transcribe_session * session) {
++    return session && session->has_result ? 1 + static_cast<int>(session->alternative_texts.size()) : 0;
++}
++
++extern "C" const char * transcribe_hypothesis_text(const struct transcribe_session * session, int index) {
++    if (index < 0 || index >= transcribe_n_hypotheses(session)) {
++        return "";
++    }
++    return index == 0 ? session->full_text.c_str() : session->alternative_texts[static_cast<size_t>(index - 1)].c_str();
++}
++
+ extern "C" const char * transcribe_raw_text(const struct transcribe_session * session) {
+     if (session == nullptr || !session->has_result) {
+         return "";
+diff --git a/src/transcribe-model.cpp b/src/transcribe-model.cpp
+index 8bf79f23..c34612f3 100644
+--- a/src/transcribe-model.cpp
++++ b/src/transcribe-model.cpp
+@@ -30,6 +30,7 @@ void transcribe_session::clear_result() {
+     segments.clear();
+     speaker_segments.clear();
+     full_text.clear();
++    alternative_texts.clear();
+     raw_text.clear();
+     detected_language.clear();
+     result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
+diff --git a/src/transcribe-phrase-boost.cpp b/src/transcribe-phrase-boost.cpp
+index c1733659..126a19cf 100644
+--- a/src/transcribe-phrase-boost.cpp
++++ b/src/transcribe-phrase-boost.cpp
+@@ -23,6 +23,10 @@ int PhraseBoost::child(int state, int32_t token) const {
+ }
+ 
+ void PhraseBoost::build(const std::vector<std::vector<int32_t>> & phrases, float score) {
++    build(phrases, score, 0.0f);
++}
++
++void PhraseBoost::build(const std::vector<std::vector<int32_t>> & phrases, float score, float first_token_score) {
+     nodes_.assign(1, Node{});
+     edges_.clear();
+     score_ = score;
+@@ -39,7 +43,7 @@ void PhraseBoost::build(const std::vector<std::vector<int32_t>> & phrases, float
+             if (next < 0) {
+                 next = static_cast<int>(nodes_.size());
+                 Node node;
+-                node.earned = nodes_[static_cast<size_t>(state)].earned + (state == root ? 0.0f : score);
++                node.earned = nodes_[static_cast<size_t>(state)].earned + (state == root ? first_token_score : score);
+                 nodes_.push_back(node);
+                 end.push_back(false);
+                 auto & c = nodes_[static_cast<size_t>(state)].children;
+diff --git a/src/transcribe-phrase-boost.h b/src/transcribe-phrase-boost.h
+index 37591179..286fd53f 100644
+--- a/src/transcribe-phrase-boost.h
++++ b/src/transcribe-phrase-boost.h
+@@ -35,6 +35,9 @@ class PhraseBoost {
+     // model has begun it, and nothing is started for it.
+     void build(const std::vector<std::vector<int32_t>> & phrases, float score);
+ 
++    // Optionally apply a smaller initial boost, including single-token terms.
++    void build(const std::vector<std::vector<int32_t>> & phrases, float score, float first_token_score);
++
+     bool empty() const { return nodes_.size() <= 1; }
+ 
+     static constexpr int root = 0;
+@@ -49,6 +52,11 @@ class PhraseBoost {
+     // The score emitting `token` from `state` earns (what apply adds to it).
+     float delta(int state, int32_t token) const;
+ 
++    float unfinished_bonus(int state) const {
++        const auto & node = nodes_[state];
++        return node.earned - node.locked;
++    }
++
+     struct Edge {
+         int32_t token;
+         int     target;
+diff --git a/src/transcribe-listen-decode.h b/src/transcribe-listen-decode.h
+new file mode 100644
+index 00000000..464cc974
+--- /dev/null
++++ b/src/transcribe-listen-decode.h
+@@ -0,0 +1,43 @@
++#pragma once
++
++#include "transcribe/listen.h"
++
++#include <cmath>
++
++namespace transcribe {
++
++inline const transcribe_listen_decode_params * listen_decode_params(const transcribe_run_params * params) {
++    if (!params || !params->family || params->family->kind != TRANSCRIBE_EXT_KIND_LISTEN_DECODE ||
++        params->family->size < sizeof(transcribe_listen_decode_params)) {
++        return nullptr;
++    }
++    return reinterpret_cast<const transcribe_listen_decode_params *>(params->family);
++}
++
++inline float listen_vocabulary_boost(const transcribe_run_params * params, float default_boost) {
++    const auto * options = listen_decode_params(params);
++    return options && options->vocabulary_boost >= 0.0f ? options->vocabulary_boost : default_boost;
++}
++
++inline transcribe_status validate_listen_decode(const transcribe_run_params * params,
++                                               bool                          supports_beam,
++                                               bool                          supports_vocabulary) {
++    if (!params || !params->family) {
++        return TRANSCRIBE_OK;
++    }
++    const auto status =
++        transcribe_ext_check(params->family, TRANSCRIBE_EXT_KIND_LISTEN_DECODE, sizeof(transcribe_listen_decode_params));
++    if (status != TRANSCRIBE_OK) {
++        return status;
++    }
++    const auto * options = listen_decode_params(params);
++    const float  boost   = options->vocabulary_boost;
++    if (options->beam_width < 1 || options->beam_width > 4 || (options->beam_width > 1 && !supports_beam) ||
++        !std::isfinite(boost) || (boost != -1.0f && (boost < 0.0f || boost > 4.0f)) ||
++        (boost > 0.0f && !supports_vocabulary)) {
++        return TRANSCRIBE_ERR_INVALID_ARG;
++    }
++    return TRANSCRIBE_OK;
++}
++
++}  // namespace transcribe
+diff --git a/src/transcribe-session.h b/src/transcribe-session.h
+index 8f4ff964..4b035af5 100644
+--- a/src/transcribe-session.h
++++ b/src/transcribe-session.h
+@@ -110,6 +110,7 @@ struct transcribe_session : transcribe::SessionCore {
+     std::vector<SegmentEntry>        segments;
+     std::vector<SpeakerSegmentEntry> speaker_segments;
+     std::string                      full_text;
++    std::vector<std::string>         alternative_texts;
+     // The model's decoded output before family post-processing (marker
+     // parsing, tag filtering, envelope stripping, whitespace trims).
+     // Equals full_text modulo whitespace for families that do none.
+@@ -137,6 +138,7 @@ struct transcribe_session : transcribe::SessionCore {
+         std::vector<SegmentEntry>        segments;
+         std::vector<SpeakerSegmentEntry> speaker_segments;
+         std::string                      full_text;
++        std::vector<std::string>         alternative_texts;
+         std::string                      raw_text;
+         std::string                      detected_language;
+         transcribe_timestamp_kind        result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
+@@ -166,6 +168,7 @@ struct transcribe_session : transcribe::SessionCore {
+         rs.segments          = segments;
+         rs.speaker_segments  = speaker_segments;
+         rs.full_text         = full_text;
++        rs.alternative_texts = alternative_texts;
+         rs.raw_text          = raw_text;
+         rs.detected_language = detected_language;
+         rs.result_kind       = result_kind;
+diff --git a/src/transcribe-tokenizer.cpp b/src/transcribe-tokenizer.cpp
+index df44330f..ba6e9d7f 100644
+--- a/src/transcribe-tokenizer.cpp
++++ b/src/transcribe-tokenizer.cpp
+@@ -501,6 +501,64 @@ transcribe_status Tokenizer::encode_sentencepiece_bpe(const std::string &    tex
+     lo = std::max(lo, 0);
+     hi = (hi < 0 || hi > n_vocab) ? n_vocab : hi;
+ 
++    SentencePieceLookup pieces;
++    const int32_t       unk = prepare_sentencepiece_lookup(lo, hi, pieces);
++    return encode_sentencepiece_with_lookup(text, out_ids, pieces, unk, remove_extra_whitespaces);
++}
++
++transcribe_status Tokenizer::encode_sentencepiece_bpe_batch(const std::vector<std::string> &    texts,
++                                                            std::vector<std::vector<int32_t>> & out_ids,
++                                                            bool remove_extra_whitespaces) const {
++    out_ids.clear();
++    if (model_ != "unigram" && model_ != "bpe") {
++        return TRANSCRIBE_ERR_NOT_IMPLEMENTED;
++    }
++    if (texts.empty()) {
++        return TRANSCRIBE_OK;
++    }
++
++    SentencePieceLookup pieces;
++    const int32_t       unk = prepare_sentencepiece_lookup(0, static_cast<int>(tokens_.size()), pieces);
++    out_ids.resize(texts.size());
++    for (size_t i = 0; i < texts.size(); ++i) {
++        const auto st = encode_sentencepiece_with_lookup(texts[i], out_ids[i], pieces, unk, remove_extra_whitespaces);
++        if (st != TRANSCRIBE_OK) {
++            out_ids.clear();
++            return st;
++        }
++    }
++    return TRANSCRIBE_OK;
++}
++
++int32_t Tokenizer::prepare_sentencepiece_lookup(int lo, int hi, SentencePieceLookup & pieces) const {
++    // Mergeable pieces in range; a lower id is a higher merge priority (a
++    // SentencePiece BPE score is minus the merge rank, and pieces are stored
++    // in rank order). Control / unknown pieces never match text.
++    constexpr int32_t k_type_unknown = 2;
++    constexpr int32_t k_type_control = 3;
++    int32_t           unk            = -1;
++    for (int id = lo; id < hi; ++id) {
++        const std::string & piece = tokens_[static_cast<size_t>(id)];
++        const int32_t       type  = token_type_.empty() ? 1 : token_type_[static_cast<size_t>(id)];
++        if (type == k_type_unknown || piece == "<unk>") {
++            unk = unk < 0 ? id : unk;
++            continue;
++        }
++        if (type != k_type_control && !piece.empty()) {
++            pieces.emplace(piece, id);
++        }
++    }
++    if (unk < 0) {
++        unk = unk_id_;
++    }
++    return unk;
++}
++
++transcribe_status Tokenizer::encode_sentencepiece_with_lookup(const std::string &         text,
++                                                              std::vector<int32_t> &      out_ids,
++                                                              const SentencePieceLookup & pieces,
++                                                              int32_t                     unk,
++                                                              bool                        remove_extra_whitespaces) {
+     // nmt_nfkc, approximated: the common NFKC compatibility mappings
+     // (ellipsis, no-break / ideographic space, full-width ASCII, f-ligatures)
+     // and whitespace handling -- tabs and newlines are spaces; optionally
+@@ -563,27 +621,6 @@ transcribe_status Tokenizer::encode_sentencepiece_bpe(const std::string &    tex
+         i = j;
+     }
+ 
+-    // Mergeable pieces in range; a lower id is a higher merge priority (a
+-    // SentencePiece BPE score is minus the merge rank, and pieces are stored
+-    // in rank order). Control / unknown pieces never match text.
+-    constexpr int32_t                        k_type_unknown = 2;
+-    constexpr int32_t                        k_type_control = 3;
+-    std::unordered_map<std::string, int32_t> pieces;
+-    int32_t                                  unk = -1;
+-    for (int id = lo; id < hi; ++id) {
+-        const std::string & piece = tokens_[static_cast<size_t>(id)];
+-        const int32_t       type  = token_type_.empty() ? 1 : token_type_[static_cast<size_t>(id)];
+-        if (type == k_type_unknown || piece == "<unk>") {
+-            unk = unk < 0 ? id : unk;
+-            continue;
+-        }
+-        if (type != k_type_control && !piece.empty()) {
+-            pieces.emplace(piece, id);
+-        }
+-    }
+-    if (unk < 0) {
+-        unk = unk_id_;
+-    }
+     if (unk < 0) {
+         return TRANSCRIBE_ERR_GGUF;
+     }
+diff --git a/src/transcribe-tokenizer.h b/src/transcribe-tokenizer.h
+index d3ac9146..a4310e5f 100644
+--- a/src/transcribe-tokenizer.h
++++ b/src/transcribe-tokenizer.h
+@@ -222,6 +222,11 @@ class Tokenizer {
+                                                int                    hi,
+                                                bool                   remove_extra_whitespaces) const;
+ 
++    // Encode several full-vocabulary terms with one prepared lookup table.
++    transcribe_status encode_sentencepiece_bpe_batch(const std::vector<std::string> &    texts,
++                                                     std::vector<std::vector<int32_t>> & out_ids,
++                                                     bool remove_extra_whitespaces) const;
++
+     // Identification + special token ids. -1 if the corresponding key
+     // was absent from the GGUF.
+     const std::string & model_type() const { return model_; }
+@@ -262,6 +267,14 @@ class Tokenizer {
+     //   RawBytes         - concatenate token bytes verbatim (legacy
+     //                      whisper.cpp .bin tiktoken-style vocab,
+     //                      where tokens are already raw UTF-8 bytes)
++    using SentencePieceLookup = std::unordered_map<std::string, int32_t>;
++    int32_t                  prepare_sentencepiece_lookup(int lo, int hi, SentencePieceLookup & pieces) const;
++    static transcribe_status encode_sentencepiece_with_lookup(const std::string &         text,
++                                                              std::vector<int32_t> &      out_ids,
++                                                              const SentencePieceLookup & pieces,
++                                                              int32_t                     unk,
++                                                              bool                        remove_extra_whitespaces);
++
+     enum class DecodeMode {
+         SentencePiece,
+         Gpt2ByteUnicode,
